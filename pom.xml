@@ -12,7 +12,7 @@
     <artifactId>hm-dianping</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>hm-dianping</name>
-    <description>Demo project for Spring Boot</description>
+    <description>High-concurrency seckill pipeline with Redis Stream observability and AI diagnosis</description>
     <properties>
         <java.version>11</java.version>
     </properties>
@@ -63,12 +63,6 @@
             <groupId>cn.hutool</groupId>
             <artifactId>hutool-all</artifactId>
             <version>5.7.17</version>
-        </dependency>
-        <!-- redisson-->
-        <dependency>
-            <groupId>org.redisson</groupId>
-            <artifactId>redisson</artifactId>
-            <version>3.13.6</version>
         </dependency>
         <!-- sentinel：AI/指标接口防刷，秒杀接口不限 -->
         <dependency>

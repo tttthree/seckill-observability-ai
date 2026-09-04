@@ -15,6 +15,7 @@ import com.hmdp.constant.RedisConstants;
 import com.hmdp.utils.RegexUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
@@ -22,6 +23,7 @@ import javax.servlet.http.HttpSession;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Collections;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
@@ -40,6 +42,12 @@ import static com.hmdp.constant.SystemConstants.USER_NICK_NAME_PREFIX;
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
 
+    private static final DefaultRedisScript<Long> VERIFY_AND_DELETE_CODE_SCRIPT =
+            new DefaultRedisScript<>(
+                    "if redis.call('get', KEYS[1]) == ARGV[1] then " +
+                            "redis.call('del', KEYS[1]); return 1 else return 0 end",
+                    Long.class);
+
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
@@ -52,18 +60,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
         //1.5 频率限制：同一手机号每分钟最多 1 次
         String limitKey = "send:limit:" + phone;
-        Boolean exists = stringRedisTemplate.hasKey(limitKey);
-        if (Boolean.TRUE.equals(exists)) {
+        Boolean allowed = stringRedisTemplate.opsForValue()
+                .setIfAbsent(limitKey, "1", Duration.ofMinutes(1));
+        if (!Boolean.TRUE.equals(allowed)) {
             return Result.fail("验证码已发送，请1分钟后再试");
         }
-        stringRedisTemplate.opsForValue()
-                .set(limitKey, "1", Duration.ofMinutes(1));
         //3.符合，生成验证码
         String code = RandomUtil.randomNumbers(6);
         //4.保存验证码到 redis
         stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone,code,LOGIN_CODE_TTL, TimeUnit.MINUTES);
         //5.发送验证码
-        log.debug("发送短信验证码成功，验证码：{}",code);
+        log.debug("短信验证码已生成并写入 Redis，phone={}", phone);
         // 返回ok
         return Result.ok();
     }
@@ -77,9 +84,15 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             return Result.fail("手机号格式错误");
         }
         //3.从redis获取验证码并校验
-        String cachCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
         String code = loginForm.getCode();
-        if (cachCode == null ||!cachCode.equals(code)){
+        if (code == null) {
+            return Result.fail("验证码错误");
+        }
+        Long verified = stringRedisTemplate.execute(
+                VERIFY_AND_DELETE_CODE_SCRIPT,
+                Collections.singletonList(LOGIN_CODE_KEY + phone),
+                code);
+        if (!Long.valueOf(1L).equals(verified)) {
             //不一致，报错
             return Result.fail("验证码错误");
         }

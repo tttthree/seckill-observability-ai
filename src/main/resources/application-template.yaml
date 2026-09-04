@@ -5,13 +5,13 @@ spring:
     name: hmdp
   datasource:
     driver-class-name: com.mysql.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
-    username: root
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:hmdp}?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USERNAME:root}
     password: ${MYSQL_PASSWORD}
   redis:
-    host: ${REDIS_HOST}
-    port: 6379
-    password: ${REDIS_PASSWORD}
+    host: ${REDIS_HOST:127.0.0.1}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
     lettuce:
       pool:
         max-active: 10
@@ -29,7 +29,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: "*"
+        include: health,info,prometheus
   prometheus:
     metrics:
       export:
@@ -60,5 +60,9 @@ seckill:
     baseline-key: seckill:metrics:baseline
 
 deepseek:
-  api-key: ${DEEPSEEK_API_KEY}
+  api-key: ${DEEPSEEK_API_KEY:}
   url: https://api.deepseek.com/v1/chat/completions
+
+admin:
+  # 后台运维和秒杀券配置接口通过 X-Admin-Token 请求头校验。
+  token: ${ADMIN_TOKEN:}

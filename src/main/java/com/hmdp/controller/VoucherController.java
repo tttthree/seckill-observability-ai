@@ -24,20 +24,10 @@ public class VoucherController {
     private IVoucherService voucherService;
 
     /**
-     * 新增普通券
-     * @param voucher 优惠券信息
-     * @return 优惠券id
-     */
-    @PostMapping
-    public Result addVoucher(@RequestBody Voucher voucher) {
-        voucherService.save(voucher);
-        return Result.ok(voucher.getId());
-    }
-
-    /**
-     * 新增秒杀券
-     * @param voucher 优惠券信息，包含秒杀信息
-     * @return 优惠券id
+     * 创建秒杀券，并同步初始化数据库与 Redis 中的活动库存。
+     *
+     * @param voucher 秒杀券信息，包含库存和有效期
+     * @return 秒杀券 id
      */
     @PostMapping("seckill")
     public Result addSeckillVoucher(@RequestBody Voucher voucher) {
@@ -45,13 +35,4 @@ public class VoucherController {
         return Result.ok(voucher.getId());
     }
 
-    /**
-     * 查询店铺的优惠券列表
-     * @param shopId 店铺id
-     * @return 优惠券列表
-     */
-    @GetMapping("/list/{shopId}")
-    public Result queryVoucherOfShop(@PathVariable("shopId") Long shopId) {
-       return voucherService.queryVoucherOfShop(shopId);
-    }
 }

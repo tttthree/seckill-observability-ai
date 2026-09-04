@@ -38,19 +38,9 @@ public class User implements Serializable {
     private String phone;
 
     /**
-     * 密码，加密存储
-     */
-    private String password;
-
-    /**
      * 昵称，默认是随机字符
      */
     private String nickName;
-
-    /**
-     * 用户头像
-     */
-    private String icon = "";
 
     /**
      * 创建时间
