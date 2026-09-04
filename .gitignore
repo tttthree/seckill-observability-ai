@@ -35,6 +35,7 @@ build/
 ### Sensitive Config ###
 src/main/resources/application.yaml
 *.log
+*.jtl
 
 ### Personal Files (not for commit) ###
 resume-v2.html
@@ -45,5 +46,9 @@ resume-v2.html
 面试拷打-完整问答.md
 项目完整面试指南.md
 面试拷打30题-完整问答.md
-ARCHITECTURE.md
 面试速记卡-5分钟版.md
+
+# Local agent and generated files
+.claude/
+tmp/
+tokens.txt
