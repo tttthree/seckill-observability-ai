@@ -20,23 +20,9 @@ public class SeckillExceptions {
         }
     }
 
-    // 2. 重复下单
-    public static class DuplicateOrderException extends SeckillBaseException {
-        public DuplicateOrderException(String message) {
-            super(message);
-        }
-    }
-
-    // 3. 订单创建失败
+    // 2. 订单创建失败
     public static class OrderCreateFailedException extends SeckillBaseException {
         public OrderCreateFailedException(String message, Throwable cause) {
-            super(message, cause);
-        }
-    }
-
-    // 4. 消息队列消费异常
-    public static class StreamConsumeException extends SeckillBaseException {
-        public StreamConsumeException(String message, Throwable cause) {
             super(message, cause);
         }
     }

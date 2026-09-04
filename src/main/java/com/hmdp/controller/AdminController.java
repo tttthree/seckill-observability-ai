@@ -6,6 +6,8 @@ import com.hmdp.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
@@ -37,6 +39,13 @@ public class AdminController {
     private static final String QUEUE_NAME = STREAM_ORDERS_KEY;
     private static final String DEAD_LETTER_QUEUE = STREAM_ORDERS_DEAD_KEY;
     private static final String RECONCILE_KEY = SECKILL_VOUCHER_DIRTY_KEY;
+    private static final DefaultRedisScript<Long> REPLAY_DEAD_LETTER_SCRIPT;
+
+    static {
+        REPLAY_DEAD_LETTER_SCRIPT = new DefaultRedisScript<>();
+        REPLAY_DEAD_LETTER_SCRIPT.setLocation(new ClassPathResource("replay-dead-letter.lua"));
+        REPLAY_DEAD_LETTER_SCRIPT.setResultType(Long.class);
+    }
 
     // ==================== 实时统计 ====================
 
@@ -164,18 +173,33 @@ public class AdminController {
 
             if (records != null) {
                 for (var record : records) {
-                    // 重新投递到主 Stream
-                    stringRedisTemplate.opsForStream()
-                            .add(QUEUE_NAME, record.getValue());
-                    // 从死信队列删除
-                    stringRedisTemplate.opsForStream()
-                            .delete(DEAD_LETTER_QUEUE, record.getId());
-                    count++;
+                    Map<Object, Object> value = record.getValue();
+                    Object userId = value.get("userId");
+                    Object voucherId = value.get("voucherId");
+                    Object orderId = value.get("id");
+                    if (userId == null || voucherId == null || orderId == null) {
+                        log.error("跳过字段不完整的死信 messageId={}", record.getId());
+                        continue;
+                    }
+                    Long replayed = stringRedisTemplate.execute(
+                            REPLAY_DEAD_LETTER_SCRIPT,
+                            List.of(
+                                    DEAD_LETTER_QUEUE,
+                                    QUEUE_NAME,
+                                    SECKILL_STOCK_KEY + voucherId,
+                                    SECKILL_ORDER_KEY + voucherId),
+                            record.getId().getValue(),
+                            String.valueOf(userId),
+                            String.valueOf(voucherId),
+                            String.valueOf(orderId));
+                    if (Long.valueOf(1L).equals(replayed)) {
+                        count++;
+                    }
                 }
             }
         } catch (Exception e) {
             log.error("死信重放失败", e);
-            return Map.of("success", false, "message", e.getMessage());
+            return Map.of("success", false, "message", "死信重放失败，请查看服务日志");
         }
 
         log.info("死信重放完成: {} 条消息已重新投递到 {}", count, QUEUE_NAME);
@@ -199,7 +223,7 @@ public class AdminController {
             return Map.of("success", true);
         } catch (Exception e) {
             log.error("手动对账异常", e);
-            return Map.of("success", false, "message", e.getMessage());
+            return Map.of("success", false, "message", "对账执行失败，请查看服务日志");
         }
     }
 
@@ -224,7 +248,7 @@ public class AdminController {
         } catch (Exception e) {
             health.put("stream_size", "N/A");
             health.put("status", "DOWN");
-            health.put("error", e.getMessage());
+            health.put("error", "Redis 状态获取失败");
         }
 
         try {
@@ -270,18 +294,4 @@ public class AdminController {
         return summary;
     }
 
-    /**
-     * 清空指定券的 Stream 中的僵尸消息（运维清理用）
-     * DELETE /admin/stream/clean?voucherId={id}
-     */
-    @DeleteMapping("/stream/clean")
-    public Map<String, Object> cleanStream(@RequestParam Long voucherId) {
-        // 这里只是示意——实际清理 Stream 需要更精细的操作
-        // Redis Stream 不支持按字段过滤删除，只能按 messageId 删除
-        log.warn("Stream 清理操作执行 voucherId={}", voucherId);
-        return Map.of(
-                "success", true,
-                "message", "Redis Stream 不支持按 voucherId 批量删除，请使用 redis-cli 操作"
-        );
-    }
 }

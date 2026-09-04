@@ -35,10 +35,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.*;
+import java.util.UUID;
 import com.hmdp.exception.SeckillExceptions.*;
 
 import static com.hmdp.constant.MetricsConstants.*;
 import static com.hmdp.constant.RedisConstants.SECKILL_STOCK_KEY;
+import static com.hmdp.constant.RedisConstants.SECKILL_ORDER_KEY;
 import static com.hmdp.constant.RedisConstants.STREAM_RETRY_KEY;
 
 /**
@@ -64,11 +66,15 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private ConsumerHealthIndicator healthIndicator;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+    private static final DefaultRedisScript<Long> DEAD_LETTER_SCRIPT;
 
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
         SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
         SECKILL_SCRIPT.setResultType(Long.class);
+        DEAD_LETTER_SCRIPT = new DefaultRedisScript<>();
+        DEAD_LETTER_SCRIPT.setLocation(new ClassPathResource("dead-letter.lua"));
+        DEAD_LETTER_SCRIPT.setResultType(Long.class);
     }
 
     // ==================== 配置（从 application.yaml 注入） ====================
@@ -76,6 +82,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private SeckillProperties seckillProperties;
 
     // 多线程消费者（共享同一个消费者组，Redis Stream 自动负载均衡）
+    // volatile：一个线程写、多个线程读的布尔标志位，不需要原子性，只需要可见性。
     private volatile boolean shuttingDown = false;
     private ExecutorService seckillOrderExecutor;
 
@@ -90,11 +97,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private static final String RECONCILE_KEY = RedisConstants.SECKILL_VOUCHER_DIRTY_KEY;
     //首次不一致记录
     private static final String RECONCILE_MISMATCH_PREFIX = "seckill:reconcile:mismatch:";
+    private final String consumerInstanceId = buildConsumerInstanceId();
 
     //项目启动后开启多个消费者线程
     @PostConstruct
     private void init() {
-        // 初始化线程池
+        // 初始化线程池 Executors.newFixedThreadPool(n, factory);
         seckillOrderExecutor = Executors.newFixedThreadPool(seckillProperties.getConsumer().getThreads(), r -> {
             Thread t = new Thread(r, "seckill-consumer");
             //声明是用户线程，默认就是false，只要有一个用户线程存活，JVM都不会退出
@@ -103,6 +111,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         });
 
         try {
+            //先有Stream 再有消费者组
             stringRedisTemplate.opsForStream()
                     .add(QUEUE_NAME, Map.of("init", "1"));
             // 创建组：在 stream.orders 这个队列上创建消费者组 g1
@@ -118,7 +127,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         // 启动多个消费者线程
         for (int i = 0; i < seckillProperties.getConsumer().getThreads(); i++) {
-            String consumerName = "c" + (i + 1);
+            String consumerName = consumerInstanceId + "-c" + (i + 1);
             seckillOrderExecutor.submit(new VoucherOrderHandler(consumerName));
             log.info("消费者线程启动: {}", consumerName);
         }
@@ -205,7 +214,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Long result = stringRedisTemplate.execute(
                 SECKILL_SCRIPT,
                 Collections.emptyList(),
-                voucherId.toString(), userId.toString(), String.valueOf(orderId)
+                //统一写法并且更安全 再一个 基本类型long 写不了 .toString()
+                String.valueOf(voucherId), String.valueOf(userId), String.valueOf(orderId)
         );
 
         if (result == null) {
@@ -251,7 +261,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             while (!shuttingDown && !Thread.currentThread().isInterrupted()) {
                 // 心跳上报，放 try 外面避免心跳异常误入 Pending 处理
                 healthIndicator.markAlive();
-                //外层try catch 只会是read消息失败  read() 失败 → 消息未分配 → 留在 Stream → 下轮循环自动重读
+                //外层 try catch 只会是read消息失败  read() 失败 → 消息未分配 → 留在 Stream → 下轮循环自动重读
                 try {
                     // 1. 批量拉取新消息 XREADGROUP GROUP g1 {consumerName} COUNT {BATCH_SIZE} BLOCK 2000 STREAMS stream.orders >
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
@@ -265,8 +275,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     if (list == null || list.isEmpty()) {
                         continue;
                     }
-                    // 3. 逐条处理：handleVoucherOrder 内部已 catch 所有异常不会外抛
-                    //    try-catch 只包 ACK，ACK 失败不拖累同批次其他记录
+                    // 3. 逐条处理：handleVoucherOrder 对"可安全丢弃"的异常(DuplicateKey/Stock)静默；
+                    //    瞬时错误会抛出 OrderCreateFailedException，此时跳过 ACK，让消息留在 PEL 由 PendingHandlerTask 重试
                     for (MapRecord<String, Object, Object> record : list) {
                         Map<Object, Object> values = record.getValue();
 
@@ -283,7 +293,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
                         //4.下单
                         VoucherOrder voucherOrder = BeanUtil.fillBeanWithMap(values, new VoucherOrder(), true);
-                        handleVoucherOrder(voucherOrder);
+                        try {
+                            handleVoucherOrder(voucherOrder);
+                        } catch (Exception e) {
+                            // 瞬时错误：不 ACK，消息留在 PEL，交给独立 PendingHandler 定时重试
+                            log.error("订单处理失败，跳过 ACK 等待重试 messageId={}", record.getId(), e);
+                            continue;
+                        }
 
                         try {
                             //5.ACK确认 SACK stream.orders g1 id
@@ -352,7 +368,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     List<MapRecord<String, Object, Object>> claimed =
                             stringRedisTemplate.opsForStream().claim(
                                     QUEUE_NAME, CONSUMER_GROUP,
-                                    seckillProperties.getPendingHandler().getConsumerName(),
+                                    seckillProperties.getPendingHandler().getConsumerName()
+                                            + "-" + consumerInstanceId,
                                     Duration.ofMillis(seckillProperties.getPendingHandler().getGracePeriodMs()),
                                     RecordId.of(messageId)
                             );
@@ -379,20 +396,27 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                         continue;
                     }
 
-                    // 5. 处理订单
-                    handleVoucherOrder(voucherOrder);
+                    // 5. 处理订单：瞬时错误会抛出，此时不 ACK、计数重试，超限进死信
+                    try {
+                        handleVoucherOrder(voucherOrder);
+                    } catch (Exception e) {
+                        log.error("PendingHandler 订单处理失败，待重试 messageId={}", record.getId(), e);
+                        // 超过重试次数 → 移入死信队列（含库存补偿）
+                        if (exceedRetry(record.getId().getValue())) {
+                            routeToDeadLetter(record);
+                        }
+                        continue; // 不 ACK，消息留在 PEL，下轮再扫
+                    }
 
-                    // 6. ACK 或死信路由
+                    // 6. ACK
                     try {
                         stringRedisTemplate.opsForStream()
                                 .acknowledge(QUEUE_NAME, CONSUMER_GROUP, record.getId());
                         healthIndicator.markSuccess();
                     } catch (Exception e) {
                         log.error("PendingHandler ACK 失败 messageId={}", record.getId(), e);
-                        // 超过重试次数 → 移入死信队列
-                        if (exceedRetry(record.getId().getValue())) {
-                            routeToDeadLetter(record);
-                        }
+                        // DB 可能已经提交，绝不能在 ACK 失败时补偿库存；保留 Pending，
+                        // 下一轮会先通过 orderExistsInDB() 幂等确认后再次 ACK。
                     }
 
                     processed++;
@@ -417,6 +441,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if (result != null && result == 1) {
             stringRedisTemplate.expire(key, Duration.ofSeconds(METRIC_TTL_SECONDS));
         }
+    }
+
+    private static String buildConsumerInstanceId() {
+        String host = System.getenv("COMPUTERNAME");
+        if (host == null || host.isBlank()) {
+            host = System.getenv("HOSTNAME");
+        }
+        if (host == null || host.isBlank()) {
+            host = "instance";
+        }
+        host = host.replaceAll("[^a-zA-Z0-9_-]", "-");
+        return host + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
 
@@ -450,14 +486,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     e);
 
         } catch (StockException e) {
-            // 库存不足
+            // Redis 已预占但 DB 暂时无法扣减：保留 Pending 重试，超限后统一原子补偿。
             incrMetric(M_STOCK_FAIL_DB);
             log.error("库存扣减失败 voucherId={}", voucherOrder.getVoucherId(), e);
+            throw e;
 
         } catch (Exception e) {
-            // 其他异常
+            // 瞬时错误（DB 超时、网络抖动等）：埋点后重新抛出，由调用方决定不 ACK、留给 Pending 重试
             incrMetric(M_COMMIT_ERROR);
-            log.error("订单处理失败 orderId={}", voucherOrder.getId(), e);
+            log.error("订单处理失败（瞬时错误，待重试） orderId={}", voucherOrder.getId(), e);
+            throw new OrderCreateFailedException("订单创建失败，等待重试", e);
         }
     }
 
@@ -492,18 +530,35 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      */
     private void routeToDeadLetter(MapRecord<String, Object, Object> record) {
         log.error("消息超过最大重试次数，移入死信队列 messageId={}", record.getId());
-        // 补偿：回退 Redis 库存（Lua 已扣减，但 DB 未扣）
         Map<Object, Object> deadValues = record.getValue();
         Object vid = deadValues.get("voucherId");
-        if (vid != null) {
-            stringRedisTemplate.opsForValue()
-                    .increment(SECKILL_STOCK_KEY + vid);
-            log.info("死信补偿：已回退 Redis 库存 voucherId={}", vid);
+        Object userId = deadValues.get("userId");
+        Object orderId = deadValues.get("id");
+        if (vid == null || userId == null || orderId == null) {
+            log.error("死信消息字段不完整，保留在 Pending 中 messageId={}", record.getId());
+            return;
         }
-        // 放入死信队列
-        stringRedisTemplate.opsForStream().add(DEAD_LETTER_QUEUE, record.getValue());
-        // ACK 原消息
-        stringRedisTemplate.opsForStream().acknowledge(QUEUE_NAME, CONSUMER_GROUP, record.getId());
+
+        String messageId = record.getId().getValue();
+        Long routed = stringRedisTemplate.execute(
+                DEAD_LETTER_SCRIPT,
+                List.of(
+                        QUEUE_NAME,
+                        SECKILL_STOCK_KEY + vid,
+                        SECKILL_ORDER_KEY + vid,
+                        DEAD_LETTER_QUEUE,
+                        STREAM_RETRY_KEY + messageId),
+                CONSUMER_GROUP,
+                messageId,
+                String.valueOf(userId),
+                String.valueOf(vid),
+                String.valueOf(orderId),
+                "retry_exhausted");
+        if (Long.valueOf(1L).equals(routed)) {
+            log.info("死信路由完成并回滚 Redis 预占 voucherId={}, orderId={}", vid, orderId);
+        } else {
+            log.info("消息已被其他消费者处理，跳过重复死信路由 messageId={}", messageId);
+        }
     }
 
     /**
@@ -566,64 +621,5 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             log.error("对账异常", e);
         }
     }
-
-    // ==================== 已废弃：handlePendingList ====================
-    // 原为消费者线程中 ACK 失败后的阻塞式 Pending 重试，已被 PendingHandlerTask 替代。
-    // PendingHandlerTask 独立线程定时 XCLAIM，不阻塞主消费，吞吐更高。
-    // 保留此方法供后续对照调试。
-//    /**
-//     * 处理pending-list
-//     * MapRecord里有三个变量：stream id value
-//     * value 里有 userId voucherId id
-//     */
-//    public void handlePendingList(String consumerName) {
-//        while (!Thread.currentThread().isInterrupted()) {
-//            healthIndicator.markAlive();
-//            List<MapRecord<String, Object, Object>> list = null;
-//            try {
-//                list = stringRedisTemplate.opsForStream().read(
-//                        Consumer.from(CONSUMER_GROUP, consumerName),
-//                        StreamReadOptions.empty().count(1),
-//                        StreamOffset.create(QUEUE_NAME, ReadOffset.from("0"))
-//                );
-//                if (list == null || list.isEmpty()) {
-//                    break;
-//                }
-//                MapRecord<String, Object, Object> record = list.get(0);
-//                Map<Object, Object> values = record.getValue();
-//
-//                if (values.containsKey("init")) {
-//                    stringRedisTemplate.opsForStream()
-//                            .acknowledge(QUEUE_NAME, CONSUMER_GROUP, record.getId());
-//                    continue;
-//                }
-//
-//                VoucherOrder voucherOrder = BeanUtil.fillBeanWithMap(values, new VoucherOrder(), true);
-//
-//                if (orderExistsInDB(voucherOrder.getId())) {
-//                    stringRedisTemplate.opsForStream()
-//                            .acknowledge(QUEUE_NAME, CONSUMER_GROUP, record.getId());
-//                    continue;
-//                }
-//                handleVoucherOrder(voucherOrder);
-//                stringRedisTemplate.opsForStream().acknowledge(QUEUE_NAME, CONSUMER_GROUP, record.getId());
-//            } catch (Exception e) {
-//                log.error("处理pending-list订单异常", e);
-//                try {
-//                    if (list != null && !list.isEmpty()) {
-//                        MapRecord<String, Object, Object> record = list.get(0);
-//                        if (exceedRetry(record.getId().getValue())) {
-//                            routeToDeadLetter(record);
-//                        }
-//                    }
-//                    Thread.sleep(20);
-//                    if (shuttingDown) return;
-//                } catch (InterruptedException ex) {
-//                    Thread.currentThread().interrupt();
-//                    return;
-//                }
-//            }
-//        }
-//    }
 
 }
