@@ -1,0 +1,64 @@
+server:
+  port: 8081
+spring:
+  application:
+    name: hmdp
+  datasource:
+    driver-class-name: com.mysql.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: root
+    password: ${MYSQL_PASSWORD}
+  redis:
+    host: ${REDIS_HOST}
+    port: 6379
+    password: ${REDIS_PASSWORD}
+    lettuce:
+      pool:
+        max-active: 10
+        max-idle: 10
+        min-idle: 1
+        time-between-eviction-runs: 10s
+  jackson:
+    default-property-inclusion: non_null
+mybatis-plus:
+  type-aliases-package: com.hmdp.entity
+logging:
+  level:
+    com.hmdp: debug
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+seckill:
+  consumer:
+    threads: 3
+    batch-size: 20
+  retry:
+    max: 3
+  reconcile:
+    fixed-delay-ms: 300000
+  load-model:
+    concurrency: 2000
+    stock: 400
+  pending-handler:
+    enabled: true
+    interval-ms: 5000
+    batch-size: 50
+    consumer-name: pending-handler
+    grace-period-ms: 5000
+  sentinel:
+    metrics-qps: 20
+    ai-analyze-qps: 1
+  ai:
+    baseline-enabled: true
+    baseline-key: seckill:metrics:baseline
+
+deepseek:
+  api-key: ${DEEPSEEK_API_KEY}
+  url: https://api.deepseek.com/v1/chat/completions

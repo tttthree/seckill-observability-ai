@@ -1,0 +1,63 @@
+# ============================================================
+# Prometheus 告警规则
+# 放在 prometheus.yml 同目录，由 rule_files 引用
+# Prometheus 侧已配好规则，Alertmanager webhook 对接即可
+# ============================================================
+
+groups:
+  - name: seckill_alerts
+    rules:
+      # ========== 消费者心跳告警 ==========
+      - alert: ConsumerThreadDown
+        expr: seckill_consumer_health == 0
+        for: 30s
+        labels:
+          severity: critical
+          component: consumer
+        annotations:
+          summary: "秒杀消费者线程挂掉"
+          description: "消费者健康状态为 DOWN，可能原因: 线程异常退出 / 心跳超时 / Pending 堆积 > 1000，当前心跳间隔 {{ $value }}ms"
+
+      # ========== 心跳超时告警 ==========
+      - alert: ConsumerHeartbeatTimeout
+        expr: seckill_consumer_heartbeat_age_ms > 30000
+        for: 10s
+        labels:
+          severity: warning
+          component: consumer
+        annotations:
+          summary: "消费者心跳超时"
+          description: "消费者心跳间隔 {{ $value }}ms，超过 30 秒阈值，可能线程卡死或 GC 停顿"
+
+      # ========== 订单成功率过低 ==========
+      - alert: LowOrderSuccessRate
+        expr: seckill_success_rate < 0.2
+        for: 1m
+        labels:
+          severity: warning
+          component: business
+        annotations:
+          summary: "订单成功率低于 20%"
+          description: "当前成功率 {{ $value | humanizePercentage }}，可能库存耗尽或基础设施异常"
+
+      # ========== 基础设施故障率过高 ==========
+      - alert: HighInfraFailRate
+        expr: seckill_infra_fail_rate > 0.1
+        for: 1m
+        labels:
+          severity: critical
+          component: infra
+        annotations:
+          summary: "基础设施失败率超过 10%"
+          description: "当前 infra_fail_rate = {{ $value | humanizePercentage }}，检查 Redis/DB/消费者是否正常"
+
+      # ========== 消费者停滞告警（活着但长时间未成功消费） ==========
+      - alert: ConsumerStalled
+        expr: seckill_consumer_success_heartbeat_age_ms > 60000
+        for: 2m
+        labels:
+          severity: warning
+          component: consumer
+        annotations:
+          summary: "消费者线程停滞：成功消费心跳超过 60 秒"
+          description: "消费者线程存活但距上次成功 ACK 已 {{ $value }}ms，可能原因: 死锁/慢查询/Redis 连接池耗尽/GC 停顿"

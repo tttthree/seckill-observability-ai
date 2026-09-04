@@ -1,0 +1,49 @@
+HELP.md
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### Sensitive Config ###
+src/main/resources/application.yaml
+*.log
+
+### Personal Files (not for commit) ###
+resume-v2.html
+八股面试题库-按模块.md
+反向拷打-监控AI可视化-完整答案.md
+第一轮面试题与答案.md
+第二轮面试题与答案.md
+面试拷打-完整问答.md
+项目完整面试指南.md
+面试拷打30题-完整问答.md
+ARCHITECTURE.md
+面试速记卡-5分钟版.md

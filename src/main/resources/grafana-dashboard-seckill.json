@@ -1,0 +1,390 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row", "title": "🏥 系统健康总览",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100, "panels": []
+    },
+    {
+      "id": 101, "type": "stat",
+      "title": "订单成功率",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1, "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red",    "value": null },
+            { "color": "orange", "value": 0.7 },
+            { "color": "green",  "value": 0.9 }
+          ]}
+        }
+      },
+      "options": { "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area", "justifyMode": "auto" },
+      "targets": [{ "expr": "seckill_success_rate", "legendFormat": "成功率", "refId": "A" }],
+      "description": "commit_success / total_requests"
+    },
+    {
+      "id": 102, "type": "stat",
+      "title": "基础设施失败率",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1, "decimals": 4,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 0.01 },
+            { "color": "red",    "value": 0.05 }
+          ]}
+        }
+      },
+      "options": { "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area", "justifyMode": "auto" },
+      "targets": [{ "expr": "seckill_infra_fail_rate", "legendFormat": "基础设施失败率", "refId": "A" }],
+      "description": "(reserve_error + commit_error + consume_error) / total_requests"
+    },
+    {
+      "id": 103, "type": "stat",
+      "title": "库存竞争失败率",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1, "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 0.5 },
+            { "color": "red",    "value": 0.8 }
+          ]}
+        }
+      },
+      "options": { "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area", "justifyMode": "auto" },
+      "targets": [{ "expr": "seckill_stock_fail_rate", "legendFormat": "库存竞争失败率", "refId": "A" }],
+      "description": "stock_fail / (stock_fail + commit_success)，排除重复和基础设施干扰"
+    },
+    {
+      "id": 104, "type": "stat",
+      "title": "Lua→DB 转化率",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1, "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red",    "value": null },
+            { "color": "orange", "value": 0.8 },
+            { "color": "green",  "value": 0.95 }
+          ]}
+        }
+      },
+      "options": { "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area", "justifyMode": "auto" },
+      "targets": [{ "expr": "seckill_lua_to_order_rate", "legendFormat": "链路转化率", "refId": "A" }],
+      "description": "commit_success / reserve_success"
+    },
+    {
+      "type": "row", "title": "📊 流量与吞吐",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "id": 200, "panels": []
+    },
+    {
+      "id": 201, "type": "timeseries",
+      "title": "请求 QPS（rate 1m）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "spanNulls": false }
+        }
+      },
+      "targets": [
+        { "expr": "rate(seckill_requests_received_total[1m])", "legendFormat": "请求 QPS", "refId": "A" },
+        { "expr": "rate(seckill_reserve_success_total[1m])", "legendFormat": "预占成功 QPS", "refId": "B" },
+        { "expr": "rate(seckill_commit_success_total[1m])", "legendFormat": "成交 QPS", "refId": "C" }
+      ],
+      "description": "三条线越接近说明链路效率越高"
+    },
+    {
+      "id": 202, "type": "timeseries",
+      "title": "请求总量趋势（increase 1m）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "spanNulls": false }
+        }
+      },
+      "targets": [
+        { "expr": "increase(seckill_requests_received_total[1m])", "legendFormat": "请求增量", "refId": "A" },
+        { "expr": "increase(seckill_commit_success_total[1m])", "legendFormat": "成交增量", "refId": "B" }
+      ],
+      "description": "每分钟新增请求 vs 新增成交"
+    },
+    {
+      "type": "row", "title": "🔻 链路漏斗 — 请求→预占→成交",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 300, "panels": []
+    },
+    {
+      "id": 301, "type": "bargauge",
+      "title": "三阶段漏斗（累计值）",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 17 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        }
+      },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true },
+      "targets": [
+        { "expr": "seckill_requests_received_total", "legendFormat": "① 总请求", "refId": "A" },
+        { "expr": "seckill_reserve_success_total", "legendFormat": "② Lua 预占成功", "refId": "B" },
+        { "expr": "seckill_commit_success_total", "legendFormat": "③ DB 成交", "refId": "C" }
+      ],
+      "description": "①→② 差距=库存/重复拦截，②→③ 差距=消费链路损耗"
+    },
+    {
+      "id": 302, "type": "timeseries",
+      "title": "各层转化率趋势",
+      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 17 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": false }
+        }
+      },
+      "targets": [
+        { "expr": "seckill_lua_success_rate", "legendFormat": "Lua 预占率", "refId": "A" },
+        { "expr": "seckill_lua_to_order_rate", "legendFormat": "Lua→DB 转化率", "refId": "B" },
+        { "expr": "seckill_success_rate", "legendFormat": "最终成功率", "refId": "C" }
+      ],
+      "description": "成功率 = 预占率 × 转化率"
+    },
+    {
+      "id": 303, "type": "timeseries",
+      "title": "链路损耗分解（堆叠）",
+      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 17 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        { "expr": "increase(seckill_stock_fail_redis_total[1m])", "legendFormat": "Redis 库存不足", "refId": "A" },
+        { "expr": "increase(seckill_duplicate_request_total[1m])", "legendFormat": "重复下单拦截", "refId": "B" },
+        { "expr": "increase(seckill_stock_fail_db_total[1m])", "legendFormat": "DB 库存不足", "refId": "C" },
+        { "expr": "increase(seckill_reserve_error_total[1m]) + ignoring(layer) increase(seckill_commit_error_total[1m]) + ignoring(layer) increase(seckill_consume_error_total[1m])", "legendFormat": "基础设施异常", "refId": "D" }
+      ],
+      "description": "哪个颜色占比最大，瓶颈就在哪"
+    },
+    {
+      "type": "row", "title": "🔍 失败归因分析",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "id": 400, "panels": []
+    },
+    {
+      "id": 401, "type": "timeseries",
+      "title": "失败类型趋势（6 类堆叠）",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 26 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        { "expr": "increase(seckill_stock_fail_redis_total[1m])", "legendFormat": "Redis 库存不足", "refId": "A" },
+        { "expr": "increase(seckill_stock_fail_db_total[1m])", "legendFormat": "DB 库存不足", "refId": "B" },
+        { "expr": "increase(seckill_duplicate_request_total[1m])", "legendFormat": "重复下单", "refId": "C" },
+        { "expr": "increase(seckill_reserve_error_total[1m])", "legendFormat": "Lua 异常", "refId": "D" },
+        { "expr": "increase(seckill_commit_error_total[1m])", "legendFormat": "DB 写入异常", "refId": "E" },
+        { "expr": "increase(seckill_consume_error_total[1m])", "legendFormat": "消费异常", "refId": "F" }
+      ],
+      "description": "业务拒绝(库存/重复) ≠ 系统故障(Lua/DB/消费异常)"
+    },
+    {
+      "id": 402, "type": "piechart",
+      "title": "失败占比分布（三类归因）",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": { "displayLabels": ["percent", "name"], "pieType": "donut" },
+      "targets": [
+        { "expr": "sum(seckill_stock_fail_redis_total) + sum(seckill_stock_fail_db_total)", "legendFormat": "库存耗尽", "refId": "A" },
+        { "expr": "seckill_duplicate_request_total", "legendFormat": "重复下单", "refId": "B" },
+        { "expr": "sum(seckill_reserve_error_total) + sum(seckill_commit_error_total) + sum(seckill_consume_error_total)", "legendFormat": "基础设施异常", "refId": "C" }
+      ],
+      "description": "一眼判断瓶颈属于业务饱和、用户行为还是系统故障"
+    },
+    {
+      "type": "row", "title": "⚙️ 基础设施健康",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "id": 500, "panels": []
+    },
+    {
+      "id": 501, "type": "timeseries",
+      "title": "基础设施异常趋势",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": false }
+        }
+      },
+      "targets": [
+        { "expr": "increase(seckill_reserve_error_total[1m])", "legendFormat": "Redis/Lua 异常", "refId": "A" },
+        { "expr": "increase(seckill_commit_error_total[1m])", "legendFormat": "DB 写入异常", "refId": "B" },
+        { "expr": "increase(seckill_consume_error_total[1m])", "legendFormat": "消费线程异常", "refId": "C" }
+      ],
+      "description": "任何一个大于 0 都需排查对应中间件"
+    },
+    {
+      "id": 502, "type": "timeseries",
+      "title": "库存对账修复",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "spanNulls": false }
+        }
+      },
+      "targets": [
+        { "expr": "increase(seckill_reconcile_fix_total[5m])", "legendFormat": "对账修复次数", "refId": "A" }
+      ],
+      "description": "大于 0 说明发生过 Redis/DB 库存不一致"
+    },
+    {
+      "type": "row", "title": "💚 消费者线程健康",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
+      "id": 550, "panels": []
+    },
+    {
+      "id": 551, "type": "stat",
+      "title": "消费者存活状态",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 44 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "value": "1", "text": "✅ UP" },
+            { "type": "value", "value": "0", "text": "💔 DOWN" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red",  "value": null },
+            { "color": "green",  "value": 1 }
+          ]},
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": { "orientation": "auto", "textMode": "auto", "colorMode": "background" },
+      "targets": [{ "expr": "seckill_consumer_health", "legendFormat": "健康状态", "refId": "A" }],
+      "description": "1=UP 消费者正常，0=DOWN 需排查"
+    },
+    {
+      "id": 552, "type": "stat",
+      "title": "心跳间隔",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 44 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "yellow", "value": 10000 },
+            { "color": "red",    "value": 30000 }
+          ]},
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": { "orientation": "auto", "textMode": "auto", "colorMode": "background" },
+      "targets": [{ "expr": "seckill_consumer_heartbeat_age_ms", "legendFormat": "心跳间隔", "refId": "A" }],
+      "description": "超过 30s 触发告警"
+    },
+    {
+      "id": 553, "type": "timeseries",
+      "title": "心跳间隔趋势",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 44 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "spanNulls": false }
+        }
+      },
+      "targets": [{ "expr": "seckill_consumer_heartbeat_age_ms", "legendFormat": "心跳间隔", "refId": "A" }],
+      "description": "正常应在 0~2s 之间波动"
+    },
+    {
+      "type": "row", "title": "🎯 期望对比 — 实际 vs 理论",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
+      "id": 600, "panels": []
+    },
+    {
+      "id": 601, "type": "timeseries",
+      "title": "实际成交量 vs 期望成交量",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "spanNulls": false }
+        }
+      },
+      "targets": [
+        { "expr": "seckill_commit_success_total", "legendFormat": "实际成交", "refId": "A" },
+        { "expr": "vector(400)", "legendFormat": "期望成交（库存量）", "refId": "B" }
+      ],
+      "description": "越接近 400 说明系统越接近理论上限"
+    },
+    {
+      "id": 602, "type": "stat",
+      "title": "库存消耗率",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 49 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1, "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 0.8 },
+            { "color": "red",    "value": 0.95 }
+          ]}
+        }
+      },
+      "options": { "orientation": "auto", "textMode": "value_and_name", "colorMode": "background" },
+      "targets": [
+        { "expr": "seckill_commit_success_total / 400", "legendFormat": "库存消耗率", "refId": "A" }
+      ],
+      "description": "成交量 / 400"
+    },
+    {
+      "id": 603, "type": "timeseries",
+      "title": "失败偏差（实际 vs 期望）",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 49 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "spanNulls": false }
+        }
+      },
+      "targets": [
+        { "expr": "sum(seckill_stock_fail_redis_total) + sum(seckill_stock_fail_db_total) + sum(seckill_duplicate_request_total) + sum(seckill_reserve_error_total) + sum(seckill_commit_error_total) + sum(seckill_consume_error_total) - 1600", "legendFormat": "失败偏差", "refId": "A" }
+      ],
+      "description": "正值=期望外失败（可能是系统故障），负值=比预期好"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["seckill", "hm-dianping", "redis"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "秒杀系统监控 — 关系建模仪表板",
+  "uid": "seckill-monitor",
+  "version": 1
+}
