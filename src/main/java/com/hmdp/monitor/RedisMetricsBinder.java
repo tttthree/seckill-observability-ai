@@ -28,7 +28,7 @@ import static com.hmdp.constant.MetricsConstants.*;
  *            duplicate_request_total, stock_fail_redis_total
  *   成交层:   commit_success_total, commit_error_total, stock_fail_db_total
  *   消费层:   consume_error_total
- *   对账层:   reconcile_fix_total
+ *   对账层:   reconcile_mismatch_total
  *
  * 第二类：关系比率（6 个）— 0~1 小数，直接反映指标间的数学关系
  *   系统健康: success_rate, infra_fail_rate
@@ -101,9 +101,9 @@ public class RedisMetricsBinder {
         counterGauge(registry, "consume_error_total", M_CONSUME_ERROR,
                 Layer.CONSUME, "消费者线程异常次数");
 
-        // 对账修复
-        counterGauge(registry, "reconcile_fix_total", M_RECONCILE_FIX,
-                Layer.RECONCILE, "库存对账自动修复次数");
+        // 两阶段对账告警
+        counterGauge(registry, "reconcile_mismatch_total", M_RECONCILE_MISMATCH,
+                Layer.RECONCILE, "持续库存不一致确认次数");
     }
 
     // ==================== 第二类：关系比率（6 个） ====================

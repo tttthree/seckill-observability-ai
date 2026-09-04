@@ -580,9 +580,19 @@ function renderQueue(d) {
 async function ops(url, label) {
     const t = document.getElementById('toast');
     try {
-        const r = await fetch(url, { method:'POST' });
+        let adminToken = sessionStorage.getItem('hmdpAdminToken');
+        if (!adminToken) {
+            adminToken = prompt('请输入管理员令牌');
+            if (!adminToken) return;
+            sessionStorage.setItem('hmdpAdminToken', adminToken);
+        }
+        const r = await fetch(url, {
+            method:'POST',
+            headers: { 'X-Admin-Token': adminToken }
+        });
+        if (r.status === 403) sessionStorage.removeItem('hmdpAdminToken');
         const d = await r.json();
-        t.textContent = d.success ? `${label} 完成` : `${label} 失败: ${d.message||''}`;
+        t.textContent = d.success ? `${label} 完成` : `${label} 失败: ${d.message||d.errorMsg||''}`;
         t.className = d.success ? 'toast ok show' : 'toast err show';
     } catch(e) {
         t.textContent = `${label} 异常`;

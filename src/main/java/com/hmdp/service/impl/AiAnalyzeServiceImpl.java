@@ -14,6 +14,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestTemplate;
 
 import javax.annotation.Resource;
@@ -101,6 +102,23 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
             }
         }
 
+        // 未配置外部 AI 时直接本地降级，避免携带运行指标发起无效请求。
+        if (deepSeekConfig == null
+                || !StringUtils.hasText(deepSeekConfig.getApiKey())
+                || !StringUtils.hasText(deepSeekConfig.getUrl())) {
+            AiAnalyzeResult unavailable = new AiAnalyzeResult();
+            unavailable.setPrimaryStatus("UNKNOWN");
+            unavailable.setSecondaryStatuses(Collections.emptyList());
+            unavailable.setKeySymptoms(Collections.emptyList());
+            unavailable.setCausalChains(Collections.emptyList());
+            unavailable.setReason("未配置 DeepSeek API，已跳过外部 AI 诊断。");
+            unavailable.setSuggestion(List.of(
+                    "配置 DEEPSEEK_API_KEY 后重新触发诊断",
+                    "配置前可先查看 /metrics/seckill 的结构化链路指标"
+            ));
+            return unavailable;
+        }
+
         try {
             // 加载历史基线（上次诊断的指标快照）
             Map<String, Object> baseline = metricsService.loadBaseline();
@@ -180,6 +198,7 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
 
         JsonNode responseJson;
         try {
+            // 没写 new，但 readTree 内部 new了，拿到返回的引用
             responseJson = objectMapper.readTree(response.getBody());
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse DeepSeek response JSON", e);
@@ -274,6 +293,8 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
             "- diagnosis 为预计算的特征信号，仅作参考，不可直接照搬为结论\n" +
             "- duplicate_request 为用户重复下单被拦截，属于合法的业务规则拒绝，不属于系统故障\n" +
             "- consume_fail 为消费者线程异常次数，属于基础设施异常信号\n" +
+            "- reconcile_mismatch 为两阶段对账确认的持续库存不一致次数，必须作为数据一致性风险证据\n" +
+            "- pending_count 为消费者组尚未 ACK 的消息数，持续升高表示消费阻塞或下游写入变慢\n" +
             "- consumer_alive 为消费者线程存活状态（1=正常，0=挂掉），0 时属于 INFRA_FAIL 级别故障\n" +
             "- heartbeat_age_ms 为距上次消费者心跳的毫秒数，超过 30000 表示心跳超时，消费者可能卡死或 GC 停顿\n";
 

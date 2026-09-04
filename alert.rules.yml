@@ -61,3 +61,14 @@ groups:
         annotations:
           summary: "消费者线程停滞：成功消费心跳超过 60 秒"
           description: "消费者线程存活但距上次成功 ACK 已 {{ $value }}ms，可能原因: 死锁/慢查询/Redis 连接池耗尽/GC 停顿"
+
+      # ========== 两阶段库存对账异常 ==========
+      - alert: InventoryReconcileMismatch
+        expr: increase(seckill_reconcile_mismatch_total[10m]) > 0
+        for: 30s
+        labels:
+          severity: warning
+          component: reconcile
+        annotations:
+          summary: "Redis 与数据库库存持续不一致"
+          description: "最近 10 分钟确认了 {{ $value }} 次持续库存不一致，请结合死信队列和订单落库指标人工处置"

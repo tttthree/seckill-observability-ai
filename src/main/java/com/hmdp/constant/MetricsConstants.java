@@ -41,9 +41,8 @@ public class MetricsConstants {
     // 消费异常（Redis Stream 消费者线程异常）
     public static final String M_CONSUME_ERROR = "seckill:metrics:consume_error";
 
-    // 对账修复（最终一致性）
-    // 对账修复次数
-    public static final String M_RECONCILE_FIX = "seckill:metrics:reconcile_fix";
+    // 两阶段对账确认的持续库存不一致次数
+    public static final String M_RECONCILE_MISMATCH = "seckill:metrics:reconcile_mismatch";
 
     /** 计数器默认 TTL（秒），压测数据 2 小时后自动清理 */
     public static final long METRIC_TTL_SECONDS = 7200;
@@ -60,7 +59,7 @@ public class MetricsConstants {
                 M_STOCK_FAIL_REDIS,
                 M_STOCK_FAIL_DB,
                 M_CONSUME_ERROR,
-                M_RECONCILE_FIX
+                M_RECONCILE_MISMATCH
         };
     }
 }

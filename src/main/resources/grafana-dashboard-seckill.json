@@ -246,7 +246,7 @@
     },
     {
       "id": 502, "type": "timeseries",
-      "title": "库存对账修复",
+      "title": "库存对账异常",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
       "fieldConfig": {
         "defaults": {
@@ -255,7 +255,7 @@
         }
       },
       "targets": [
-        { "expr": "increase(seckill_reconcile_fix_total[5m])", "legendFormat": "对账修复次数", "refId": "A" }
+        { "expr": "increase(seckill_reconcile_mismatch_total[5m])", "legendFormat": "持续不一致次数", "refId": "A" }
       ],
       "description": "大于 0 说明发生过 Redis/DB 库存不一致"
     },

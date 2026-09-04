@@ -613,6 +613,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 }
                 log.error("库存持续不一致，需人工介入！voucherId={}, redis={}, db={}",
                         voucherId, redisStock, dbStock);
+                incrMetric(M_RECONCILE_MISMATCH);
                 stringRedisTemplate.opsForValue()
                         .set(mismatchKey, String.valueOf(System.currentTimeMillis()),
                                 Duration.ofMinutes(10));

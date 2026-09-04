@@ -38,7 +38,9 @@ public class MetricsServiceImpl implements MetricsService {
     /** AI 基线对比：保存的运行时指标字段 */
     private static final List<String> AI_BASELINE_RUNTIME_KEYS = List.of(
             "total_requests", "reserve_success", "order_success",
-            "stock_fail", "duplicate_request", "infra_fail"
+            "stock_fail", "duplicate_request", "redis_fail", "db_fail",
+            "consume_fail", "infra_fail", "reconcile_mismatch",
+            "consumer_alive", "pending_count"
     );
 
     /** AI 基线对比：保存的漏斗分析字段 */
@@ -97,9 +99,9 @@ public class MetricsServiceImpl implements MetricsService {
         runtimeMetrics.put("consume_fail", consumeFail);
         runtimeMetrics.put("infra_fail", infraFail);
 
-        // 对账修复次数
-        double reconcileFix = get(M_RECONCILE_FIX);
-        runtimeMetrics.put("reconcile_fix", reconcileFix);
+        // 两阶段对账确认的持续库存不一致次数
+        double reconcileMismatch = get(M_RECONCILE_MISMATCH);
+        runtimeMetrics.put("reconcile_mismatch", reconcileMismatch);
 
         // 消费者健康状态
         Health consumerHealth = consumerHealthIndicator.health();
@@ -154,7 +156,7 @@ public class MetricsServiceImpl implements MetricsService {
                 safeDiv(orderSuccess, reserveSuccess));
 
         funnelAnalysis.put("commit_drop_rate",
-                1 - safeDiv(orderSuccess, reserveSuccess));
+                reserveSuccess == 0 ? 0.0 : 1 - safeDiv(orderSuccess, reserveSuccess));
 
         // ================= diagnosis（4.AI语义输入层）只回答：现象是什么（不推理） =================
         Map<String, Object> diagnosis = new HashMap<>();
@@ -164,6 +166,9 @@ public class MetricsServiceImpl implements MetricsService {
         double infraFailRate = (Double) capacityAnalysis.get("infra_fail_rate");
 
         systemFeatures.put("infra_fail_rate", infraFailRate);
+        systemFeatures.put("consumer_alive", runtimeMetrics.get("consumer_alive"));
+        systemFeatures.put("pending_count", runtimeMetrics.get("pending_count"));
+        systemFeatures.put("reconcile_mismatch", reconcileMismatch);
 
         // business features（业务信号）
         Map<String, Object> businessFeatures = new HashMap<>();
@@ -187,6 +192,14 @@ public class MetricsServiceImpl implements MetricsService {
 
         if (redisFail > 0 || dbFail > 0) {
             symptoms.add("infra_error_detected");
+        }
+
+        if (consumeFail > 0) {
+            symptoms.add("consume_error_detected");
+        }
+
+        if (reconcileMismatch > 0) {
+            symptoms.add("inventory_mismatch_detected");
         }
 
         // ===== AI context（纯特征工程，不做归因决策，归因交由 AI 完成）=====
