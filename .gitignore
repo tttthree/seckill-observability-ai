@@ -51,4 +51,5 @@ resume-v2.html
 # Local agent and generated files
 .claude/
 tmp/
+output/
 tokens.txt
