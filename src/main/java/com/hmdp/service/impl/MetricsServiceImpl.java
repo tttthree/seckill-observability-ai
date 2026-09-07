@@ -214,7 +214,7 @@ public class MetricsServiceImpl implements MetricsService {
         // ================= context =================
         result.put("context", Map.of(
                 "system", "seckill",
-                "env", "production",
+                "env", "benchmark",
                 "test_type", "pressure_test",
                 "time_window_seconds", 300
         ));
