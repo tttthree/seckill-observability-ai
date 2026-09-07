@@ -57,10 +57,6 @@ public class ConsumerHealthIndicator implements HealthIndicator {
                         .build();
             }
 
-            // 成功消费心跳检查 — 消费者活着但长时间未成功消费（卡死/死锁/Redis 连接池耗尽）
-            long successAge = System.currentTimeMillis() - lastSuccessHeartbeat.get();
-            String consumerStatus = successAge > 60_000 ? "DEGRADED" : "HEALTHY";
-
             // 2. 检查 Redis Stream Pending 堆积
             //    同时提取 pending_count 供 MetricsService 使用（一次查询，两处消费）
             long pendingCount = 0;
@@ -76,6 +72,10 @@ public class ConsumerHealthIndicator implements HealthIndicator {
                         .withDetail("redis_error", e.getMessage())
                         .build();
             }
+
+            // 仅在存在待处理消息且长时间未成功 ACK 时降级；空闲队列属于正常状态
+            long successAge = System.currentTimeMillis() - lastSuccessHeartbeat.get();
+            String consumerStatus = pendingCount > 0 && successAge > 60_000 ? "DEGRADED" : "HEALTHY";
 
             if (pendingCount > PENDING_ALERT_THRESHOLD) {
                 return Health.down()
