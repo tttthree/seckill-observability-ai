@@ -16,8 +16,6 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * @author zt
- * @version 1.0
  */
 @Slf4j
 @RestController
@@ -37,11 +35,9 @@ public class MetricsController {
     public Map<String, Object> seckillMetrics() {
         Entry entry = null;
         try {
-            // 告诉 Sentinel：有个请求要进"metrics"这个资源了
             entry = SphU.entry("metrics");
             return metricsService.getSeckillMetrics();
         } catch (BlockException e) {
-            // 返回 error 提示
             return Map.of("error", "请求太频繁，请稍后再试");
         } finally {
             if (entry != null) {
@@ -69,7 +65,6 @@ public class MetricsController {
             Map<String, Object> metrics = metricsService.getSeckillMetrics();
             return aiAnalyzeService.analyze(metrics);
         } catch (BlockException e) {
-            // 返回一个 UNKNOWN 状态的兜底结果。
             AiAnalyzeResult fallback = new AiAnalyzeResult();
             fallback.setPrimaryStatus("UNKNOWN");
             fallback.setSecondaryStatuses(Collections.emptyList());

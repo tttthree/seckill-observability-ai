@@ -18,8 +18,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * K8s （自动修）可用此端点做存活探测：/actuator/health → DOWN → 自动重启 Pod
  * K8s 默认 terminationGracePeriodSeconds = 30，Pod 超过这个时间还在跑就直接 SIGKILL
  * 上报的本质是在可能长时间阻塞的地方前面刷新时间戳
- * @author zt
- * @version 3.0
  */
 @Slf4j
 @Component
@@ -43,7 +41,6 @@ public class ConsumerHealthIndicator implements HealthIndicator {
     @Override
     public Health health() {
         try {
-            // 1. 检查消费者线程是否存活
             if (!consumerAlive.get()) {
                 return Health.down()
                         .withDetail("reason", "消费者线程未启动")
@@ -57,7 +54,6 @@ public class ConsumerHealthIndicator implements HealthIndicator {
                         .build();
             }
 
-            // 2. 检查 Redis Stream Pending 堆积
             //    同时提取 pending_count 供 MetricsService 使用（一次查询，两处消费）
             long pendingCount = 0;
             try {
@@ -85,7 +81,6 @@ public class ConsumerHealthIndicator implements HealthIndicator {
                         .build();
             }
 
-            // 3. 检查死信队列是否有新增
             try {
                 // .size(key)  XLEN  死信队列 stream.orders.dead  Stream 里所有消息数量
                 Long deadCount = stringRedisTemplate.opsForStream()

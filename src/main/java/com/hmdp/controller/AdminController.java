@@ -19,8 +19,6 @@ import static com.hmdp.constant.RedisConstants.*;
 /**
  * 运维管理接口（秒杀控制、死信重放、手动对账、实时统计）
  *
- * @author zt
- * @version 3.0
  */
 @Slf4j
 @RestController
@@ -57,16 +55,13 @@ public class AdminController {
     public Map<String, Object> seckillStats(@PathVariable Long voucherId) {
         Map<String, Object> stats = new LinkedHashMap<>();
 
-        // Redis 库存
         String redisStock = stringRedisTemplate.opsForValue()
                 .get(SECKILL_STOCK_KEY + voucherId);
         stats.put("redis_stock", redisStock != null ? Integer.parseInt(redisStock) : 0);
 
-        // DB 库存
         var voucher = seckillVoucherService.getById(voucherId);
         stats.put("db_stock", voucher != null ? voucher.getStock() : "N/A");
 
-        // 已售数量
         long orderCount = voucherOrderService.lambdaQuery()
                 .eq(VoucherOrder::getVoucherId, voucherId)
                 .count();
@@ -74,8 +69,6 @@ public class AdminController {
 
         // Stream Pending 堆积（XPENDING，不是 XLEN）
         try {
-            //Range.unbounded() — 查所有消息 ID，不限范围
-            //.pending() → XPENDING → 返回 PendingMessages 对象 → 只查 PEL 里未 ACK 的消息，.size()拿数量
             var pending = stringRedisTemplate.opsForStream()
                     .pending(QUEUE_NAME, "g1", Range.unbounded(), 10000L);
             stats.put("stream_pending", pending != null ? pending.size() : 0);
@@ -83,25 +76,20 @@ public class AdminController {
             stats.put("stream_pending", "N/A（Redis 不可用）");
         }
 
-        // 死信队列
         try {
-            //.size() → XLEN → 返回 Long 总数 → Stream 里全部消息，不管是否已 ACK
             Long dead = stringRedisTemplate.opsForStream().size(DEAD_LETTER_QUEUE);
             stats.put("dead_letter_size", dead != null ? dead : 0);
         } catch (Exception e) {
             stats.put("dead_letter_size", "N/A");
         }
 
-        // 脏券数量
         try {
-            //拿 Set 里所有元素
             Set<String> dirty = stringRedisTemplate.opsForSet().members(RECONCILE_KEY);
             stats.put("dirty_voucher_count", dirty != null ? dirty.size() : 0);
         } catch (Exception e) {
             stats.put("dirty_voucher_count", "N/A");
         }
 
-        // Redis- DB 是否一致
         if (redisStock != null && voucher != null && voucher.getStock() != null) {
             int redis = Integer.parseInt(redisStock);
             int db = voucher.getStock();
@@ -239,7 +227,6 @@ public class AdminController {
         health.put("queue", QUEUE_NAME);
 
         try {
-            // pendinglist
             var pending = stringRedisTemplate.opsForStream()
                     .pending(QUEUE_NAME, "g1", Range.unbounded(), 10000L);
             long pendingCount = pending != null ? pending.size() : 0;
@@ -252,7 +239,6 @@ public class AdminController {
         }
 
         try {
-            // 死信队列
             Long dead = stringRedisTemplate.opsForStream().size(DEAD_LETTER_QUEUE);
             health.put("dead_letter_size", dead);
         } catch (Exception e) {

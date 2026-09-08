@@ -15,8 +15,6 @@ import java.util.List;
 /**
  * Sentinel 规则：仅保护 AI/指标接口，秒杀接口不限流（脉冲流量由 Redis Lua 竞争）。
  *
- * @author zt
- * @version 5.0
  */
 @Slf4j
 @Configuration

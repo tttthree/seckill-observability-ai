@@ -19,8 +19,6 @@ import static com.hmdp.constant.MetricsConstants.*;
 
 /**
  * AI可诊断指标采集服务（四层语义模型）
- * @author zt
- * @version 1.0
  */
 @Slf4j
 @Service
@@ -290,7 +288,6 @@ public class MetricsServiceImpl implements MetricsService {
             Map<String, Object> baseline = new HashMap<>();
             baseline.put("exists", true);
             Map<String, Object> snapshot = new HashMap<>();
-            //把每个key 转成 String，原样丢到新 Map 里
             raw.forEach((k, v) -> snapshot.put(String.valueOf(k), v));
             baseline.put("snapshot", snapshot);
             return baseline;

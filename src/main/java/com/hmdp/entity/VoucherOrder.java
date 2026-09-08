@@ -15,13 +15,10 @@ import java.time.LocalDateTime;
  * 
  * </p>
  *
- * @author 虎哥
- * @since 2021-12-22
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
 @Accessors(chain = true)
-//指定这个类对应数据库哪张表
 @TableName("tb_voucher_order")
 public class VoucherOrder implements Serializable {
 

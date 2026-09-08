@@ -4,8 +4,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 /**
- * @author zt
- * @version 1.0
  */
 @Component
 @ConfigurationProperties(prefix = "deepseek")

@@ -8,8 +8,6 @@ import org.springframework.stereotype.Component;
  * 秒杀业务配置（对应 application.yaml 中 seckill.* 段）
  * yaml 里没写的就保留 Java new 的默认值
  *
- * @author zt
- * @version 1.0
  */
 @Data
 @Component

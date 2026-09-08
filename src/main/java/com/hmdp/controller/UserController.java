@@ -17,8 +17,6 @@ import javax.servlet.http.HttpSession;
  * 前端控制器
  * </p>
  *
- * @author 虎哥
- * @since 2021-12-22
  */
 @Slf4j
 @RestController
@@ -33,7 +31,6 @@ public class UserController {
      */
     @PostMapping("code")
     public Result sendCode(@RequestParam("phone") String phone, HttpSession session) {
-        // 发送短信验证码并保存验证码
         return userService.sendCode(phone,session);
     }
 
@@ -43,13 +40,11 @@ public class UserController {
      */
     @PostMapping("/login")
     public Result login(@RequestBody LoginFormDTO loginForm, HttpSession session){
-        // 实现登录功能
         return userService.login(loginForm,session);
     }
 
     @GetMapping("/me")
     public Result me(){
-        // 获取当前登录的用户并返回
         UserDTO user = UserHolder.getUser();
         return Result.ok(user);
     }

@@ -18,8 +18,6 @@ import java.util.Map;
  * <p>
  * 配合 alert.rules.yml + Alertmanager （通知人） 即可实现消费者心跳超时 / Pending 堆积的自动告警。
  *
- * @author zt
- * @version 3.1
  */
 @Slf4j
 @Component
@@ -37,7 +35,6 @@ public class HealthMetricsExporter {
 
     @PostConstruct
     public void register() {
-        // 1. 消费者健康状态：1 = UP, 0 = DOWN
         Gauge.builder("seckill_consumer_health", consumerHealthIndicator, h -> {
                     Health health = h.health();
                     return Status.UP.equals(health.getStatus()) ? 1 : 0;
@@ -45,7 +42,6 @@ public class HealthMetricsExporter {
                 .description("消费者线程健康状态: 1=UP, 0=DOWN（心跳超时/Pending堆积/线程未启动）")
                 .register(meterRegistry);
 
-        // 2. 心跳间隔（毫秒），-1 表示取不到
         Gauge.builder("seckill_consumer_heartbeat_age_ms", consumerHealthIndicator, h -> {
                     Health health = h.health();
                     Map<String, Object> details = health.getDetails();
@@ -60,7 +56,6 @@ public class HealthMetricsExporter {
 
         log.info("HealthMetricsExporter 注册完成: seckill_consumer_health + seckill_consumer_heartbeat_age_ms");
 
-        // 3. 成功消费心跳间隔（毫秒），区分"活着"与"正常工作"
         Gauge.builder("seckill_consumer_success_heartbeat_age_ms", consumerHealthIndicator, h -> {
                     Health health = h.health();
                     Map<String, Object> details = health.getDetails();

@@ -1,7 +1,6 @@
 package com.hmdp.constant;
 
 /**
- * @author 虎哥
  */
 public abstract class RegexPatterns {
     /**

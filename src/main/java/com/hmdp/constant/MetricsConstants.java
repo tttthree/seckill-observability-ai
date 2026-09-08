@@ -2,8 +2,6 @@ package com.hmdp.constant;
 
 /**
  * 秒杀系统指标常量
- * @author zt
- * @version 1.0
  */
 public class MetricsConstants {
     /**

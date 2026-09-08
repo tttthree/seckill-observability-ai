@@ -61,7 +61,6 @@ public class VoucherOrderController {
 
         // 第二优先级：查 Redis Set（Lua 已成功，但还没到 DB）
         String orderKey = SECKILL_ORDER_KEY + voucherId;
-        //isMember 查某个值在不在里面
         Boolean inSet = stringRedisTemplate.opsForSet()
                 .isMember(orderKey, userId.toString());
 

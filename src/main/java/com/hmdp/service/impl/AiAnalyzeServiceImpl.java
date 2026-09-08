@@ -22,8 +22,6 @@ import java.util.*;
 
 /**
  * AI秒杀系统故障诊断服务
- * @author zt
- * @version 1.0
  */
 @Slf4j
 @Service
@@ -123,7 +121,6 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
             // 加载历史基线（上次诊断的指标快照）
             Map<String, Object> baseline = metricsService.loadBaseline();
 
-            //构造 prompt（含基线对比数据）
             String prompt = buildPrompt(input, baseline);
             String content = callDeepSeek(prompt);
 
@@ -198,13 +195,11 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
 
         JsonNode responseJson;
         try {
-            // 没写 new，但 readTree 内部 new了，拿到返回的引用
             responseJson = objectMapper.readTree(response.getBody());
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse DeepSeek response JSON", e);
         }
 
-        //choices[0].message.content
         return responseJson.path("choices")
                 .get(0)
                 .path("message")
@@ -227,24 +222,20 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
         if (content == null) {
             return "";
         }
-        //去掉首尾空格和换行符
         content = content.trim();
 
-        //去Markdown
         if (content.startsWith("```")) {
             content = content.replace("```json", "")
                     .replace("```", "")
                     .trim();
         }
 
-        //substring() 的第二个参数是 左闭右开区间 [start, end+1）
         int start = content.indexOf("{");
         int end = content.lastIndexOf("}");
         if (start >= 0 && end > start) {
             content = content.substring(start, end + 1);
         }
 
-        //删除所有不可见控制字符保留换行和Tab
         return content.replaceAll("[\\x00-\\x1F&&[^\\n\\t]]", "");
     }
 
@@ -256,7 +247,6 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
             return "{}";
         }
         try {
-            //Jackson 提供的对象转 JSON 方法
             return objectMapper.writeValueAsString(obj);
         } catch (JsonProcessingException e) {
             log.warn("JSON 序列化失败: {}", e.getMessage());
@@ -268,7 +258,6 @@ public class AiAnalyzeServiceImpl implements AiAnalyzeService {
     private AiAnalyzeResult fallback(Exception e) {
         AiAnalyzeResult fallbackResult = new AiAnalyzeResult();
         fallbackResult.setPrimaryStatus("UNKNOWN");
-        //Collections.emptyList() 返回一个不可修改的空 List 即[]
         fallbackResult.setSecondaryStatuses(Collections.emptyList());
         fallbackResult.setKeySymptoms(Collections.emptyList());
         fallbackResult.setCausalChains(Collections.emptyList());

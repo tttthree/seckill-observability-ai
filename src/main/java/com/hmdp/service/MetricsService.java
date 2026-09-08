@@ -3,8 +3,6 @@ package com.hmdp.service;
 import java.util.Map;
 
 /**
- * @author zt
- * @version 1.0
  */
 public interface MetricsService {
     Map<String, Object> getSeckillMetrics();
