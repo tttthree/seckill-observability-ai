@@ -9,9 +9,9 @@
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com.hmdp</groupId>
-    <artifactId>hm-dianping</artifactId>
+    <artifactId>seckill-observability-ai</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>hm-dianping</name>
+    <name>seckill-observability-ai</name>
     <description>High-concurrency seckill pipeline with Redis Stream observability and AI diagnosis</description>
     <properties>
         <java.version>11</java.version>

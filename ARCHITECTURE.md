@@ -1,4 +1,4 @@
-# hm-dianping 秒杀系统架构
+# Seckill Observability & AI Diagnosis 架构
 
 ## 1. 边界
 

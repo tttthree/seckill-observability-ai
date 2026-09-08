@@ -41,15 +41,12 @@ import static com.hmdp.constant.MetricsConstants.*;
  * 不实现 MeterBinder（会被 BeanPostProcessor 早期回调导致 Lettuce→Micrometer 环路），
  * 改用 ApplicationReadyEvent 延迟注册，此时所有组件均已就绪。
  *
- * @author zt
- * @version 2.0
  */
 @Slf4j
 @Component
 public class RedisMetricsBinder {
 
     @Resource
-    // 指标注册中心，所有 Meter都要注册到这里
     private MeterRegistry meterRegistry;
 
     @Resource
@@ -59,7 +56,7 @@ public class RedisMetricsBinder {
 
     private static final List<Tag> BASE_TAGS = List.of(
             Tag.of("source", "redis"),
-            Tag.of("application", "hm-dianping")
+            Tag.of("application", "seckill-observability")
     );
 
     // ==================== 延迟注册入口 ====================
@@ -151,7 +148,6 @@ public class RedisMetricsBinder {
     private void counterGauge(MeterRegistry registry, String name, String redisKey,
                               String layer, String description) {
         List<Tag> tags = withLayer(layer);
-        //Supplier<Double> supplier =() -> read(redisKey);
         Gauge.builder(PREFIX + "_" + name, () -> read(redisKey))
                 .tags(tags)
                 .description(description)
@@ -161,7 +157,6 @@ public class RedisMetricsBinder {
     /** 注册比率 Gauge（值域 0~1） */
     private void rateGauge(MeterRegistry registry, String name, List<Tag> tags,
                            String description, Supplier<Double> supplier) {
-        //supplier是一个更复杂的 Lambda（包含多次 read() + 除法逻辑）
         Gauge.builder(PREFIX + "_" + name, supplier::get)
                 .tags(tags)
                 .description(description)
@@ -189,7 +184,7 @@ public class RedisMetricsBinder {
     private static List<Tag> withLayer(String layer) {
         return Arrays.asList(
                 BASE_TAGS.get(0),   // Tag("source", "redis")
-                BASE_TAGS.get(1),   // Tag("application", "hm-dianping")
+                BASE_TAGS.get(1),
                 Tag.of("layer", layer)  // 动态 Tag
         );
     }

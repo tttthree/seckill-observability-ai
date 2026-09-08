@@ -379,7 +379,7 @@
   "refresh": "5s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["seckill", "hm-dianping", "redis"],
+  "tags": ["seckill", "seckill-observability", "redis"],
   "templating": { "list": [] },
   "time": { "from": "now-15m", "to": "now" },
   "timepicker": {},
