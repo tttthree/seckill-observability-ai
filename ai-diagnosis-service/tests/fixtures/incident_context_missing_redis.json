@@ -14,8 +14,8 @@
     "first_detected_at": "2026-01-15T15:58:00",
     "last_detected_at": "2026-01-15T16:04:30",
     "resolved_at": "2026-01-15T16:05:00",
-    "title": "Redis ä¸ MySQL åºå­æç»­ä¸ä¸è´ï¼voucherId=7001ï¼",
-    "description": "è¿ç»­ä¸¤è½®å¯¹è´¦ç¡®è®¤åå·®ï¼redisStock=0, dbStock=1, deviation=1ï¼ç³»ç»ä¸ä¼èªå¨è¦çåºå­ï¼éäººå·¥ä»å¥",
+    "title": "Redis 与 MySQL 库存持续不一致（voucherId=7001）",
+    "description": "连续两轮对账确认偏差：redisStock=0, dbStock=1, deviation=1；系统不会自动覆盖库存，需人工介入",
     "detected_snapshot": {
       "voucher_id": 7001,
       "redis_stock": 0,
@@ -119,12 +119,12 @@
     ],
     "truncations": [],
     "notes": [
-      "built_at ä¸åæ®µ observed_at ä¸º UTC Instantï¼incident æ®µæ¶é´å­æ®µåæ ·åèªæ°æ®åº LocalDateTimeï¼åå²å­å¨ä¸å«æ¶åºä¿¡æ¯ï¼æªéå ä»»ä½ offset",
-      "incident æ®µï¼å« detected_snapshotï¼æ¯æ£æµæ¶å»è¯æ®ï¼å¶ä½åæ®µæ¯æå»ºæ¶å»è¯»å°çå½åç¶æï¼ä¸¤èä¸å¯æ··ç¨",
-      "detected_snapshot ä»ä¿çæè¿ä¸æ¬¡æ£æµè¯æ®ï¼scope=LATEST_DETECTIONï¼ï¼æ´æ© occurrence çè¯æ®å·²è¢«èåè¦ç",
-      "metrics.counters ä¸º Redis è®¡æ°å¨åå§å¼ï¼counter_presence=false è¡¨ç¤ºè¯¥è®¡æ°å¨ key ä¸å­å¨ï¼æé¡¹ç®æ¢æçº¦å®ä»¥ 0 åä¸è®¡ç®ï¼å¯è½ä»£è¡¨æ äºä»¶æå·²è¿æ(TTL 7200s)",
-      "detected_snapshot ä¸ recent_orders åæç½ååæå½±ï¼ä¸å« user_id ç­ç¨æ·æ è¯",
-      "logs å¨å½åçæ¬ä¸å¯ç¨ï¼æ ç»æåæ¥å¿æºï¼ï¼åä¸º not_implemented_sourcesï¼ä¸å½±å complete"
+      "built_at 与各段 observed_at 为 UTC Instant；incident 段时间字段原样取自数据库 LocalDateTime，历史存储不含时区信息，未附加任何 offset",
+      "incident 段（含 detected_snapshot）是检测时刻证据；其余各段是构建时刻读到的当前状态，两者不可混用",
+      "detected_snapshot 仅保留最近一次检测证据（scope=LATEST_DETECTION），更早 occurrence 的证据已被聚合覆盖",
+      "metrics.counters 为 Redis 计数器原始值；counter_presence=false 表示该计数器 key 不存在，按项目既有约定以 0 参与计算，可能代表无事件或已过期(TTL 7200s)",
+      "detected_snapshot 与 recent_orders 均按白名单投影，不含 user_id 等用户标识",
+      "logs 在当前版本不可用（无结构化日志源），列为 not_implemented_sources，不影响 complete"
     ]
   }
 }
