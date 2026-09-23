@@ -246,9 +246,6 @@ public class IncidentContext {
         private String name;
         private Long consumersTotal;
         private Long pendingTotal;
-        /** Redis 未上报时为 null */
-        private Long lag;
-        private Long entriesRead;
         private String lastDeliveredId;
     }
 

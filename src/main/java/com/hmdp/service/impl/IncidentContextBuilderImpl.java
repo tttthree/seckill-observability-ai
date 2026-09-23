@@ -440,10 +440,10 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
     /**
      * 只输出消费者组聚合信息，不输出消费者明细列表。
      * <p>
-     * lag / entries_read 在当前客户端栈不可得：spring-data-redis 2.7.18 的
-     * {@link StreamInfo.XInfoGroup} 未暴露这两个字段，而 {@code RedisConnection.execute}
-     * 在 Lettuce 下使用 ByteArrayOutput，无法解码含整数的嵌套数组回复（实测抛
-     * UnsupportedOperationException）。因此这两个字段恒为 null，并由 context_quality.notes 说明。
+     * 契约刻意不提供 lag / entries_read：当前客户端栈无法稳定获取
+     * （spring-data-redis 2.7.18 的 {@link StreamInfo.XInfoGroup} 未暴露这两个字段，
+     * 而 {@code RedisConnection.execute} 在 Lettuce 下使用 ByteArrayOutput，
+     * 无法解码含整数的嵌套数组回复），因此不把永久为 null 的字段冻结进下游契约。
      */
     private ConsumerGroupSummary readConsumerGroup(String streamKey) {
         String groupName = RedisConstants.STREAM_ORDERS_GROUP;
@@ -686,7 +686,7 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
                     ContextConstants.NOTE_SNAPSHOT_SCOPE,
                     ContextConstants.NOTE_METRICS_CONVENTION,
                     ContextConstants.NOTE_PRIVACY,
-                    ContextConstants.NOTE_GROUP_EXTRAS_UNAVAILABLE,
+                    ContextConstants.NOTE_GROUP_LAG_NOT_COLLECTED,
                     ContextConstants.NOTE_LOGS);
         }
     }

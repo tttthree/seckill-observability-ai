@@ -59,7 +59,7 @@ class IncidentContextJsonContractTest {
                         .setRecentOrders(List.of(new RecentOrder().setOrderId(99L).setVoucherId(7L)))
                         .setRecentOrdersLimit(20))
                 .setQueue(new QueueEvidence()
-                        .setConsumerGroup(new ConsumerGroupSummary().setName("g1").setLag(null)))
+                        .setConsumerGroup(new ConsumerGroupSummary().setName("g1").setConsumersTotal(null)))
                 .setConsumerHealth(null)
                 .setRuntime(null)
                 .setContextQuality(new ContextQuality()
@@ -79,7 +79,9 @@ class IncidentContextJsonContractTest {
         assertTrue(json.contains("\"resolved_at\":null"), json);
         assertTrue(json.contains("\"recent_previous_incidents\":null"), json);
         assertTrue(json.contains("\"seckill_voucher\":null"), json);
-        assertTrue(json.contains("\"lag\":null"), json);
+        // 契约刻意不提供 lag / entries_read 字段，不得再次出现（按字段名断言，notes 文本可提及原因）
+        assertFalse(json.contains("\"lag\":"), json);
+        assertFalse(json.contains("\"entries_read\":"), json);
         // 未计划的段本身为 null，且不出现在 quality 列表中
         assertTrue(json.contains("\"consumer_health\":null"), json);
         assertTrue(json.contains("\"runtime\":null"), json);

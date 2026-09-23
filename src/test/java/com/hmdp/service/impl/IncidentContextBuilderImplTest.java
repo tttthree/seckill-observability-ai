@@ -172,9 +172,6 @@ class IncidentContextBuilderImplTest {
         assertNotNull(context.getConsumerHealth());
         assertNull(context.getRuntime());
         assertNotNull(context.getQueue().getConsumerGroup());
-        // lag / entries_read 在当前客户端栈不可得，契约保留字段但恒为 null，并由 notes 说明
-        assertNull(context.getQueue().getConsumerGroup().getLag());
-        assertNull(context.getQueue().getConsumerGroup().getEntriesRead());
         assertEquals(Long.valueOf(15L), context.getQueue().getConsumerGroup().getConsumersTotal());
         assertEquals(Long.valueOf(0L), context.getQueue().getConsumerGroup().getPendingTotal());
         assertEquals("1790159932387-0", context.getQueue().getConsumerGroup().getLastDeliveredId());

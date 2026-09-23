@@ -246,9 +246,9 @@ UNIQUE KEY uk_incident_open (open_key)
 
 `GET /admin/incidents/{id}/context`：Incident 存在返回 200（可为 partial）；不存在返回 404 + `INCIDENT_NOT_FOUND`；主证据（Incident 行）读取异常按既有运维查询语义抛出。实时构建、不落库、全程只读。
 
-### 8.4 已知不可得字段
+### 8.4 契约中刻意不提供的字段
 
-`queue.consumer_group.lag / entries_read` 恒为 `null`：spring-data-redis 2.7.18 的 `XInfoGroup` 未暴露这两个字段，而 `RedisConnection.execute` 在 Lettuce 下使用 `ByteArrayOutput`，无法解码含整数的嵌套数组回复（实测 `UnsupportedOperationException`）。该限制由 `context_quality.notes` 明示。
+`queue.consumer_group` 只包含 `name / consumers_total / pending_total / last_delivered_id`，**不提供 `lag` 与 `entries_read`**：spring-data-redis 2.7.18 的 `XInfoGroup` 未暴露这两个字段，而 `RedisConnection.execute` 在 Lettuce 下使用 `ByteArrayOutput`，无法解码含整数的嵌套数组回复（实测 `UnsupportedOperationException`）。既然无法在真实环境稳定取得，就不把永久为 `null` 的字段冻结进 V2-3 契约；该说明同时写入 `context_quality.notes`，避免下游误以为数据缺失。
 
 ## 9. AI 诊断
 

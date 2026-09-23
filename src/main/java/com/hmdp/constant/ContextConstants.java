@@ -68,9 +68,10 @@ public class ContextConstants {
     public static final String NOTE_LOGS =
             "logs 在当前版本不可用（无结构化日志源），列为 not_implemented_sources，不影响 complete";
 
-    public static final String NOTE_GROUP_EXTRAS_UNAVAILABLE =
-            "queue.consumer_group.lag / entries_read 在当前客户端栈不可得（spring-data-redis 2.7.18 的 XInfoGroup "
-                    + "未暴露这两个字段，RedisConnection.execute 在 Lettuce 下无法解码含整数的嵌套数组回复），恒为 null";
+    public static final String NOTE_GROUP_LAG_NOT_COLLECTED =
+            "queue.consumer_group 不包含 lag / entries_read：当前客户端栈无法稳定获取"
+                    + "（spring-data-redis 2.7.18 未暴露该字段，原始命令在 Lettuce 下无法解码含整数的嵌套回复），"
+                    + "契约中刻意不提供，避免永久为 null 的字段进入下游";
 
     private ContextConstants() {
     }
