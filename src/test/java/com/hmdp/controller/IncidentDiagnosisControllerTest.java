@@ -169,6 +169,7 @@ class IncidentDiagnosisControllerTest {
         result.setErrorCode("MODEL_NOT_CONFIGURED");
         result.setErrorOrigin(AiDiagnosisResult.ORIGIN_PYTHON);
         result.setEvidenceValidation(new AiDiagnosisResult.EvidenceValidation(0, 0, 0, 0));
+        result.setHttpStatus(200);
         result.setAttempts(1);
         when(aiDiagnosisClient.diagnose(any())).thenReturn(result);
 
@@ -176,6 +177,7 @@ class IncidentDiagnosisControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.diagnosis_status").value("UNAVAILABLE"))
                 .andExpect(jsonPath("$.error_code").value("MODEL_NOT_CONFIGURED"))
+                .andExpect(jsonPath("$.http_status").value(200))
                 .andExpect(jsonPath("$.error_origin").value("PYTHON"));
     }
 
@@ -192,6 +194,7 @@ class IncidentDiagnosisControllerTest {
                 .andExpect(jsonPath("$.error_code").value("AI_SERVICE_UNREACHABLE"))
                 .andExpect(jsonPath("$.error_origin").value("JAVA_INTEGRATION"))
                 .andExpect(jsonPath("$.attempts").value(2))
+                .andExpect(jsonPath("$.http_status").value(0))
                 .andExpect(jsonPath("$.elapsed_ms").value(4012))
                 .andExpect(jsonPath("$.root_cause").doesNotExist())
                 .andExpect(jsonPath("$.evidence").isEmpty())
@@ -219,7 +222,8 @@ class IncidentDiagnosisControllerTest {
                 .andExpect(jsonPath("$.diagnosis_status").value("UNAVAILABLE"))
                 .andExpect(jsonPath("$.error_code").value("AI_RATE_LIMITED"))
                 .andExpect(jsonPath("$.error_origin").value("JAVA_INTEGRATION"))
-                .andExpect(jsonPath("$.attempts").value(0));
+                .andExpect(jsonPath("$.attempts").value(0))
+                .andExpect(jsonPath("$.http_status").value(0));
 
         verify(aiDiagnosisClient, never()).diagnose(any());
         verify(aiDiagnosisClient).rateLimited(any());

@@ -69,8 +69,10 @@ public class AiDiagnosisResult {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String pythonErrorCode;
 
-    /** Java 降级时实际收到的 HTTP 状态码；未收到响应为 0 */
-    @JsonInclude(JsonInclude.Include.NON_NULL)
+    /**
+     * Java 集成层实际收到的 HTTP 状态码：收到响应时为真实状态码（含成功透传的 200），
+     * **未收到任何响应时恒为 0**（不是 null、不会缺字段）。
+     */
     private Integer httpStatus;
 
     /** Java 实际尝试次数：正常调用为 1~max-attempts；未发起调用（禁用/限流）为 0 */
@@ -111,7 +113,8 @@ public class AiDiagnosisResult {
 
         result.setErrorOrigin(errorCode == null ? null : ORIGIN_JAVA_INTEGRATION);
         result.setPythonErrorCode(pythonErrorCode);
-        result.setHttpStatus(httpStatus);
+        // 冻结约定：未收到响应统一为 0，不得为 null 或缺字段
+        result.setHttpStatus(httpStatus == null ? 0 : httpStatus);
         result.setAttempts(attempts);
         return result;
     }

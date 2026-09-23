@@ -390,10 +390,17 @@ Python V2-3 DiagnosisService → DiagnosisResult
 | `diagnosis_status` / `context_version` / `incident_id` / `incident_type` / `root_cause` / `evidence[]` / `recommended_actions[]` / `insufficient_reason` / `error_code` / `evidence_validation` / `model` / `prompt_version` / `diagnosed_at` / `elapsed_ms` | Python | 原样透传；`observed` 用 `Object`（真实值类型不定） |
 | `error_origin` | Java | `PYTHON`（错误码来自 Python）/ `JAVA_INTEGRATION` |
 | `python_error_code` | Java | Java 降级时保留 Python 错误体的 `error_code`（如 `INVALID_CONTEXT`），不丢线索 |
-| `http_status` | Java | Java 降级时实际收到的状态码；未收到响应为 0 |
+| `http_status` | Java | Java 实际收到的状态码：收到响应时为真实值（成功透传即 200），**未收到响应时恒为 0**，不得为 null 或缺字段 |
 | `attempts` | Java | 实际尝试次数；未发起调用（禁用/限流）为 0 |
 
-**错误码命名约定**：`AI_*` 前缀**只由 Java 集成层生成**（`AI_SERVICE_DISABLED` / `AI_RATE_LIMITED` / `AI_SERVICE_CONNECT_TIMEOUT` / `AI_SERVICE_READ_TIMEOUT` / `AI_SERVICE_UNREACHABLE` / `AI_SERVICE_UNAVAILABLE` / `AI_SERVICE_HTTP_5XX` / `AI_SERVICE_HTTP_4XX` / `AI_SERVICE_REQUEST_REJECTED` / `AI_RESPONSE_INVALID` / `AI_REQUEST_INVALID`）；其余取值均为 Python `ErrorCode` 原样返回。
+**错误码命名约定**：`AI_*` 前缀**只由 Java 集成层生成**（`AI_SERVICE_DISABLED` / `AI_RATE_LIMITED` / `AI_SERVICE_CONNECT_TIMEOUT` / `AI_SERVICE_READ_TIMEOUT` / `AI_SERVICE_UNREACHABLE` / `AI_SERVICE_UNAVAILABLE` / `AI_SERVICE_HTTP_5XX` / `AI_SERVICE_HTTP_4XX` / `AI_SERVICE_REQUEST_REJECTED` / `AI_SERVICE_URL_INVALID` / `AI_RESPONSE_INVALID` / `AI_REQUEST_INVALID`）；其余取值均为 Python `ErrorCode` 原样返回。
+
+### 11.2.1 响应校验（200 才校验，任一违反 → `AI_RESPONSE_INVALID`，不重试）
+
+- 契约完整性：`context_version` / `diagnosis_status` / `evidence` / `recommended_actions` / `prompt_version` / `diagnosed_at` / `elapsed_ms` / `evidence_validation`（四字段齐全）必须存在；
+- **请求相关性**：`context_version` == 请求 Context 的 `context_version`、`incident_id` == 请求的 `incident.id`、`incident_type` == 请求的 `incident.incident_type`（防串包 / 缓存 / 版本错配）；
+- V2-3.3 不变量：`submitted == accepted + dropped + over_limit`、`evidence.size() == accepted`；
+- 状态语义：`DIAGNOSED` 需 `root_cause` 非空且 `accepted > 0`；`INSUFFICIENT_EVIDENCE` 需 `root_cause`/`recommended_actions`/`error_code` 均为空；`UNAVAILABLE` 需 `error_code` 非空。
 
 ### 11.3 失败语义与重试边界（有界，不泛化成容错平台）
 
@@ -410,6 +417,7 @@ Python V2-3 DiagnosisService → DiagnosisResult
 | connection refused / unknown host | 重试 1 次；仍失败则本地降级 | `AI_SERVICE_UNREACHABLE` | **是（≤1 次）** |
 | **read timeout** | 本地降级 | `AI_SERVICE_READ_TIMEOUT` | **否** |
 | 其它 I/O 失败 | 本地降级 | `AI_SERVICE_UNAVAILABLE` | 否 |
+| `ai-diagnosis.url` 非法（缺失 scheme / 端口越界等本地 URI 配置错误） | 本地降级，异常不逃出客户端 | `AI_SERVICE_URL_INVALID` | 否 |
 | `ai-diagnosis.enabled=false` | 本地降级，不发起 HTTP | `AI_SERVICE_DISABLED` | 否（attempts=0） |
 | Sentinel 限流 | 本地降级，不发起 HTTP | `AI_RATE_LIMITED` | 否（attempts=0） |
 
@@ -425,7 +433,7 @@ Java 本地降级结果的冻结语义：`diagnosis_status=UNAVAILABLE`、`root_
 | `ai-diagnosis.url` | `http://127.0.0.1:8000/api/v1/diagnosis` | Python V2-3 端点 |
 | `ai-diagnosis.connect-timeout-ms` | `2000` | 独立 `@Bean("aiDiagnosisRestTemplate")`，不复用全局 RestTemplate |
 | `ai-diagnosis.read-timeout-ms` | `45000` | 必须大于 Python 侧 `deepseek_timeout_seconds=40s` |
-| `ai-diagnosis.max-attempts` | `2` | 1 次调用 + 最多 1 次额外重试；无退避 |
+| `ai-diagnosis.max-attempts` | `2` | 1 次调用 + 最多 1 次额外重试；无退避；**运行时代码硬限制在 [1,2]**，配置为 3/99 也只尝试 2 次 |
 | `ai-diagnosis.qps` | `1` | Sentinel 资源 `incident-diagnosis`；规则与既有规则**合并**加载 |
 
 ### 11.5 权限

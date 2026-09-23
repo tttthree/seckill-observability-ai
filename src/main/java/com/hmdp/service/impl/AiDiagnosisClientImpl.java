@@ -25,7 +25,9 @@ import org.springframework.web.client.RestTemplate;
 
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -61,13 +63,27 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
     public static final String CODE_HTTP_4XX = "AI_SERVICE_HTTP_4XX";
     /** 422/413：Java 送出的 Context 不被 Python 接受（不重试） */
     public static final String CODE_REQUEST_REJECTED = "AI_SERVICE_REQUEST_REJECTED";
-    /** 200 但响应无法解析 / 违反 V2-3 冻结语义（不重试） */
+    /** 200 但响应无法解析 / 违反 V2-3 冻结语义 / 请求相关性不一致（不重试） */
     public static final String CODE_RESPONSE_INVALID = "AI_RESPONSE_INVALID";
     /** Java 侧请求序列化失败（不重试） */
     public static final String CODE_REQUEST_INVALID = "AI_REQUEST_INVALID";
+    /** ai-diagnosis.url 非法等本地 URI 配置错误（不重试） */
+    public static final String CODE_URL_INVALID = "AI_SERVICE_URL_INVALID";
 
     /** 允许重试的服务端状态码：仅网关/服务不可用语义的 502/503/504，**500 不重试** */
     private static final Set<Integer> RETRYABLE_STATUS = Set.of(502, 503, 504);
+
+    /**
+     * 总尝试次数硬上限：即使配置写成 3/99，也最多总尝试 2 次（1 次调用 + 最多 1 次额外重试）。
+     * 运行时代码强制执行，配置只允许在其内收紧。
+     */
+    static final int MAX_ALLOWED_ATTEMPTS = 2;
+
+    /** 未收到任何 HTTP 响应时的 http_status 约定值（不得为 null/缺字段） */
+    static final int NO_HTTP_RESPONSE_STATUS = 0;
+
+    /** cause chain 最大遍历深度，防止异常自引用导致死循环 */
+    private static final int MAX_CAUSE_DEPTH = 10;
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -87,7 +103,7 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
 
         if (!properties.isEnabled()) {
             log.info("AI 诊断已关闭(ai-diagnosis.enabled=false)，本地降级 incidentId={}", incidentId(context));
-            return local(context, CODE_DISABLED, null, null, 0, elapsedMs(started));
+            return local(context, CODE_DISABLED, null, NO_HTTP_RESPONSE_STATUS, 0, elapsedMs(started));
         }
 
         String requestJson;
@@ -98,10 +114,10 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
             // 只记录异常类型，不输出契约内容
             log.warn("AI 诊断请求序列化失败，本地降级 incidentId={}, type={}",
                     incidentId(context), e.getClass().getSimpleName());
-            return local(context, CODE_REQUEST_INVALID, null, null, 0, elapsedMs(started));
+            return local(context, CODE_REQUEST_INVALID, null, NO_HTTP_RESPONSE_STATUS, 0, elapsedMs(started));
         }
 
-        int maxAttempts = Math.max(1, properties.getMaxAttempts());
+        int maxAttempts = resolveMaxAttempts();
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
@@ -130,23 +146,45 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
                     continue;
                 }
                 log.warn("AI 诊断调用失败，本地降级 incidentId={}, code={}", incidentId(context), code);
-                return local(context, code, null, null, attempt, elapsedMs(started));
+                return local(context, code, null, NO_HTTP_RESPONSE_STATUS, attempt, elapsedMs(started));
+
+            } catch (IllegalArgumentException e) {
+                // ai-diagnosis.url 非法等本地 URI 配置错误：不得逃逸出客户端，也不重试
+                log.warn("AI 诊断 URL 配置非法，本地降级 incidentId={}, type={}",
+                        incidentId(context), e.getClass().getSimpleName());
+                return local(context, CODE_URL_INVALID, null, NO_HTTP_RESPONSE_STATUS, attempt,
+                        elapsedMs(started));
 
             } catch (RestClientException e) {
                 // 传输层其它异常（如 converter 层）：不重试，按响应不可用处理
                 log.warn("AI 诊断调用异常，本地降级 incidentId={}, type={}",
                         incidentId(context), e.getClass().getSimpleName());
-                return local(context, CODE_RESPONSE_INVALID, null, null, attempt, elapsedMs(started));
+                return local(context, CODE_RESPONSE_INVALID, null, NO_HTTP_RESPONSE_STATUS, attempt,
+                        elapsedMs(started));
             }
         }
 
         // 循环内所有分支均已 return，这里仅作为编译器兜底
-        return local(context, CODE_UNAVAILABLE, null, null, maxAttempts, elapsedMs(started));
+        return local(context, CODE_UNAVAILABLE, null, NO_HTTP_RESPONSE_STATUS, maxAttempts,
+                elapsedMs(started));
     }
 
     @Override
     public AiDiagnosisResult rateLimited(IncidentContext context) {
-        return local(context, CODE_RATE_LIMITED, null, null, 0, 0L);
+        return local(context, CODE_RATE_LIMITED, null, NO_HTTP_RESPONSE_STATUS, 0, 0L);
+    }
+
+    /**
+     * 解析实际允许的总尝试次数：配置可收紧（1），但**不可放宽**到 2 次以上。
+     */
+    private int resolveMaxAttempts() {
+        int configured = properties.getMaxAttempts();
+        int resolved = configured < 1 ? 1 : Math.min(configured, MAX_ALLOWED_ATTEMPTS);
+        if (configured != resolved) {
+            log.warn("ai-diagnosis.max-attempts={} 超出允许范围 [1,{}]，运行时按 {} 执行",
+                    configured, MAX_ALLOWED_ATTEMPTS, resolved);
+        }
+        return resolved;
     }
 
     // ==================== 响应处理与 V2-3 冻结语义校验 ====================
@@ -170,7 +208,7 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
             return local(context, CODE_RESPONSE_INVALID, null, status, attempt, elapsedMs);
         }
 
-        String violation = validatePythonResult(result);
+        String violation = validatePythonResult(context, result);
         if (violation != null) {
             log.warn("AI 诊断响应违反 V2-3 冻结语义，本地降级 incidentId={}, violation={}",
                     incidentId(context), violation);
@@ -178,6 +216,8 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
         }
 
         result.setAttempts(attempt);
+        // 已收到 HTTP 响应：http_status 保留真实状态码（200），永不缺字段
+        result.setHttpStatus(status);
         if (result.getErrorCode() != null) {
             // 200 + UNAVAILABLE：错误码由 Python 生成
             result.setErrorOrigin(AiDiagnosisResult.ORIGIN_PYTHON);
@@ -188,13 +228,26 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
     }
 
     /**
-     * 校验 Python 200 响应的契约完整性与 V2-3 冻结语义。
+     * 校验 Python 200 响应的契约完整性、**请求相关性**与 V2-3 冻结语义。
      *
      * @return {@code null} 表示通过；否则返回违反原因（仅用于日志，不含响应内容）
      */
-    private String validatePythonResult(AiDiagnosisResult result) {
+    private String validatePythonResult(IncidentContext context, AiDiagnosisResult result) {
         if (!StringUtils.hasText(result.getContextVersion())) {
             return "missing context_version";
+        }
+        // 请求相关性：响应必须属于本次请求（防止串包 / 缓存 / 版本错配）
+        if (!Objects.equals(result.getContextVersion(), context.getContextVersion())) {
+            return "context_version mismatch";
+        }
+        Long expectedIncidentId = incidentId(context);
+        if (!Objects.equals(result.getIncidentId(), expectedIncidentId)) {
+            return "incident_id mismatch";
+        }
+        String expectedIncidentType = context.getIncident() == null
+                ? null : context.getIncident().getIncidentType();
+        if (!Objects.equals(result.getIncidentType(), expectedIncidentType)) {
+            return "incident_type mismatch";
         }
         String status = result.getDiagnosisStatus();
         if (status == null) {
@@ -276,7 +329,7 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
     }
 
     /**
-     * I/O 异常分类。
+     * I/O 异常分类（沿 cause chain 判定，UnknownHostException 与 connection refused 同类）。
      *
      * <p>
      * {@code HttpURLConnection} 不暴露「超时发生在连接阶段还是读取阶段」，只能按异常类型与消息做
@@ -285,13 +338,17 @@ public class AiDiagnosisClientImpl implements AiDiagnosisClient {
      * </p>
      */
     private String classifyAccessError(ResourceAccessException e) {
-        Throwable cause = e.getCause() != null ? e.getCause() : e;
-        if (cause instanceof ConnectException) {
-            return CODE_UNREACHABLE;
-        }
-        if (cause instanceof SocketTimeoutException) {
-            String message = cause.getMessage() == null ? "" : cause.getMessage().toLowerCase();
-            return message.contains("connect") ? CODE_CONNECT_TIMEOUT : CODE_READ_TIMEOUT;
+        // cause chain 可能有包装（如 ConnectException -> UnknownHostException），逐层判定
+        Throwable cause = e;
+        for (int depth = 0; cause != null && depth < MAX_CAUSE_DEPTH; depth++) {
+            if (cause instanceof UnknownHostException || cause instanceof ConnectException) {
+                return CODE_UNREACHABLE;
+            }
+            if (cause instanceof SocketTimeoutException) {
+                String message = cause.getMessage() == null ? "" : cause.getMessage().toLowerCase();
+                return message.contains("connect") ? CODE_CONNECT_TIMEOUT : CODE_READ_TIMEOUT;
+            }
+            cause = cause.getCause() == cause ? null : cause.getCause();
         }
         return CODE_UNAVAILABLE;
     }

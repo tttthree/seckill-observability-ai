@@ -18,11 +18,13 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -32,6 +34,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.ExpectedCount.times;
@@ -148,7 +152,8 @@ class AiDiagnosisClientImplTest {
         assertNull(result.getErrorCode());
         assertNull(result.getErrorOrigin());
         assertNull(result.getPythonErrorCode());
-        assertNull(result.getHttpStatus());
+        // 已收到 HTTP 响应：http_status 保留真实状态码
+        assertEquals(200, result.getHttpStatus());
     }
 
     @Test
@@ -165,6 +170,7 @@ class AiDiagnosisClientImplTest {
         assertTrue(result.getRecommendedActions().isEmpty());
         assertNull(result.getErrorCode());
         assertEquals(1, result.getAttempts());
+        assertEquals(200, result.getHttpStatus());
     }
 
     @Test
@@ -179,6 +185,7 @@ class AiDiagnosisClientImplTest {
         assertEquals("MODEL_NOT_CONFIGURED", result.getErrorCode());
         assertEquals(AiDiagnosisResult.ORIGIN_PYTHON, result.getErrorOrigin());
         assertEquals(1, result.getAttempts());
+        assertEquals(200, result.getHttpStatus());
     }
 
     @Test
@@ -186,13 +193,35 @@ class AiDiagnosisClientImplTest {
         server.expect(requestTo(properties.getUrl()))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(jsonPath("$.incident_context.context_version").value("v2-2.1"))
-                .andExpect(jsonPath("$.incident_context.incident.incident_id").value(42))
+                .andExpect(jsonPath("$.incident_context.incident.incident_id").value(9001))
                 .andExpect(jsonPath("$.incident_context.incident.incident_type").value("INVENTORY_MISMATCH"))
                 .andRespond(withSuccess(DIAGNOSED_BODY, MediaType.APPLICATION_JSON));
 
         client.diagnose(context());
 
         server.verify();
+    }
+
+    // ==================== 请求相关性校验（防串包 / 版本错配） ====================
+
+    @Test
+    void shouldRejectContextVersionMismatch() {
+        String body = DIAGNOSED_BODY.replace("\"context_version\":\"v2-2.1\"",
+                "\"context_version\":\"v2-9.9\"");
+        assertDegradedAfterSingleCall(body, AiDiagnosisClientImpl.CODE_RESPONSE_INVALID);
+    }
+
+    @Test
+    void shouldRejectIncidentIdMismatch() {
+        String body = DIAGNOSED_BODY.replace("\"incident_id\":9001", "\"incident_id\":7002");
+        assertDegradedAfterSingleCall(body, AiDiagnosisClientImpl.CODE_RESPONSE_INVALID);
+    }
+
+    @Test
+    void shouldRejectIncidentTypeMismatch() {
+        String body = DIAGNOSED_BODY.replace("\"incident_type\":\"INVENTORY_MISMATCH\"",
+                "\"incident_type\":\"DEAD_LETTER\"");
+        assertDegradedAfterSingleCall(body, AiDiagnosisClientImpl.CODE_RESPONSE_INVALID);
     }
 
     // ==================== 200 但违反 V2-3 冻结语义 → AI_RESPONSE_INVALID（不重试） ====================
@@ -298,6 +327,7 @@ class AiDiagnosisClientImplTest {
         server.verify();
         assertEquals(AiDiagnosisResult.STATUS_DIAGNOSED, result.getDiagnosisStatus());
         assertEquals(2, result.getAttempts(), "503 必须恰好重试 1 次");
+        assertEquals(200, result.getHttpStatus());
     }
 
     @Test
@@ -308,8 +338,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 2);
-        assertEquals(503, result.getHttpStatus());
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 2, 503);
     }
 
     @Test
@@ -320,8 +349,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 2);
-        assertEquals(504, result.getHttpStatus());
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 2, 504);
     }
 
     @Test
@@ -334,8 +362,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 1);
-        assertEquals(500, result.getHttpStatus());
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 1, 500);
         assertEquals("INTERNAL", result.getPythonErrorCode());
     }
 
@@ -349,8 +376,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_REQUEST_REJECTED, 1);
-        assertEquals(422, result.getHttpStatus());
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_REQUEST_REJECTED, 1, 422);
         assertEquals("INVALID_CONTEXT", result.getPythonErrorCode());
     }
 
@@ -364,8 +390,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_REQUEST_REJECTED, 1);
-        assertEquals(413, result.getHttpStatus());
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_REQUEST_REJECTED, 1, 413);
         assertEquals("CONTEXT_TOO_LARGE", result.getPythonErrorCode());
     }
 
@@ -376,8 +401,48 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_4XX, 1);
-        assertEquals(400, result.getHttpStatus());
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_4XX, 1, 400);
+    }
+
+    // ==================== 尝试次数硬上限 [1,2] ====================
+
+    @Test
+    void shouldClampConfiguredAttemptsToHardMaximum() {
+        // 即使配置成 99，也最多总尝试 2 次：mock server 只准备 2 次响应
+        properties.setMaxAttempts(99);
+        server.expect(times(2), requestTo(properties.getUrl()))
+                .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+
+        AiDiagnosisResult result = client.diagnose(context());
+
+        server.verify();
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 2, 503);
+    }
+
+    @Test
+    void shouldClampConfiguredAttemptsToHardMaximumOnRetryableIoError() {
+        properties.setMaxAttempts(50);
+        server.expect(times(2), requestTo(properties.getUrl()))
+                .andRespond(request -> {
+                    throw new ResourceAccessException("Connection refused",
+                            new ConnectException("Connection refused"));
+                });
+
+        AiDiagnosisResult result = client.diagnose(context());
+
+        server.verify();
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNREACHABLE, 2, 0);
+    }
+
+    @Test
+    void shouldTreatNonPositiveConfiguredAttemptsAsSingleAttempt() {
+        properties.setMaxAttempts(0);
+        server.expect(requestTo(properties.getUrl())).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+
+        AiDiagnosisResult result = client.diagnose(context());
+
+        server.verify();
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_HTTP_5XX, 1, 503);
     }
 
     // ==================== I/O 失败分类与重试边界 ====================
@@ -393,8 +458,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_CONNECT_TIMEOUT, 2);
-        assertNull(result.getHttpStatus());
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_CONNECT_TIMEOUT, 2, 0);
     }
 
     @Test
@@ -408,7 +472,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_READ_TIMEOUT, 1);
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_READ_TIMEOUT, 1, 0);
     }
 
     @Test
@@ -422,7 +486,36 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNREACHABLE, 2);
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNREACHABLE, 2, 0);
+    }
+
+    @Test
+    void shouldRetryOnUnknownHost() {
+        server.expect(times(2), requestTo(properties.getUrl()))
+                .andRespond(request -> {
+                    throw new ResourceAccessException("ai-diagnosis.invalid: Name or service not known",
+                            new UnknownHostException("ai-diagnosis.invalid"));
+                });
+
+        AiDiagnosisResult result = client.diagnose(context());
+
+        server.verify();
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNREACHABLE, 2, 0);
+    }
+
+    @Test
+    void shouldRetryOnUnknownHostNestedInCauseChain() {
+        // cause chain: ResourceAccessException -> IOException -> UnknownHostException
+        server.expect(times(2), requestTo(properties.getUrl()))
+                .andRespond(request -> {
+                    throw new ResourceAccessException("request failed",
+                            new IOException("wrapped", new UnknownHostException("ai-diagnosis.invalid")));
+                });
+
+        AiDiagnosisResult result = client.diagnose(context());
+
+        server.verify();
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNREACHABLE, 2, 0);
     }
 
     @Test
@@ -435,10 +528,48 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNAVAILABLE, 1);
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNAVAILABLE, 1, 0);
     }
 
-    // ==================== 禁用 / 限流 / 请求序列化失败：绝不调用 Python ====================
+    // ==================== 本地配置 / 禁用 / 限流：绝不调用 Python、绝不抛异常 ====================
+
+    @Test
+    void shouldDegradeOnLocalUriConfigurationError() {
+        RestTemplate failingTemplate = mock(RestTemplate.class);
+        when(failingTemplate.exchange(anyString(), any(HttpMethod.class), any(), eq(String.class)))
+                .thenThrow(new IllegalArgumentException("URI is not absolute"));
+
+        AiDiagnosisClientImpl badUrlClient =
+                new AiDiagnosisClientImpl(failingTemplate, objectMapper, properties);
+
+        AiDiagnosisResult result = badUrlClient.diagnose(context());
+
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_URL_INVALID, 1, 0);
+    }
+
+    @Test
+    void shouldDegradeOnMalformedConfiguredUrl() {
+        // 典型误配置：AI_DIAGNOSIS_URL 少了 scheme（真实路径实测为 IllegalArgumentException）
+        properties.setUrl("localhost:8000/api/v1/diagnosis");
+
+        AiDiagnosisResult result = client.diagnose(context());
+
+        server.verify();
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_URL_INVALID, 1, 0);
+    }
+
+    @Test
+    void shouldDegradeOnUrlWithOutOfRangePort() {
+        // 端口越界由真实请求工厂在建立连接前判定（MockRestServiceServer 会绕过该校验，故这里用真实 factory）
+        AiDiagnosisProperties badProperties = new AiDiagnosisProperties();
+        badProperties.setUrl("http://127.0.0.1:99999/api/v1/diagnosis");
+        AiDiagnosisClientImpl badClient = new AiDiagnosisClientImpl(
+                new RestTemplate(new SimpleClientHttpRequestFactory()), objectMapper, badProperties);
+
+        AiDiagnosisResult result = badClient.diagnose(context());
+
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_URL_INVALID, 1, 0);
+    }
 
     @Test
     void shouldSkipHttpCallWhenDisabled() {
@@ -447,7 +578,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_DISABLED, 0);
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_DISABLED, 0, 0);
     }
 
     @Test
@@ -455,7 +586,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.rateLimited(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_RATE_LIMITED, 0);
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_RATE_LIMITED, 0, 0);
     }
 
     @Test
@@ -470,7 +601,7 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = failingClient.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_REQUEST_INVALID, 0);
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_REQUEST_INVALID, 0, 0);
     }
 
     // ==================== 真实 socket 路径 ====================
@@ -489,7 +620,7 @@ class AiDiagnosisClientImplTest {
 
         AiDiagnosisResult result = realClient.diagnose(context());
 
-        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNREACHABLE, 2);
+        assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_UNREACHABLE, 2, 0);
     }
 
     @Test
@@ -526,7 +657,7 @@ class AiDiagnosisClientImplTest {
 
             AiDiagnosisResult result = slowClient.diagnose(context());
 
-            assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_READ_TIMEOUT, 1);
+            assertJavaDegradation(result, AiDiagnosisClientImpl.CODE_READ_TIMEOUT, 1, 0);
             assertEquals(1, hits.get(), "读取超时不得重试");
         } finally {
             httpServer.stop(0);
@@ -542,17 +673,20 @@ class AiDiagnosisClientImplTest {
         AiDiagnosisResult result = client.diagnose(context());
 
         server.verify();
-        assertJavaDegradation(result, expectedCode, 1);
-        assertEquals(200, result.getHttpStatus());
+        assertJavaDegradation(result, expectedCode, 1, 200);
     }
 
     /** Java 本地降级的统一冻结语义 */
-    private static void assertJavaDegradation(AiDiagnosisResult result, String expectedCode, int expectedAttempts) {
+    private static void assertJavaDegradation(AiDiagnosisResult result, String expectedCode,
+                                              int expectedAttempts, int expectedHttpStatus) {
         assertNotNull(result);
         assertEquals(AiDiagnosisResult.STATUS_UNAVAILABLE, result.getDiagnosisStatus(), "降级结果必须是 UNAVAILABLE");
         assertEquals(expectedCode, result.getErrorCode());
         assertEquals(AiDiagnosisResult.ORIGIN_JAVA_INTEGRATION, result.getErrorOrigin());
         assertEquals(expectedAttempts, result.getAttempts());
+        // http_status 永不缺字段：未收到响应为 0，收到响应为真实状态码
+        assertNotNull(result.getHttpStatus(), "http_status 不得为 null");
+        assertEquals(expectedHttpStatus, result.getHttpStatus());
         assertNull(result.getRootCause(), "禁止伪造成 DIAGNOSED");
         assertTrue(result.getEvidence().isEmpty());
         assertTrue(result.getRecommendedActions().isEmpty());
@@ -566,7 +700,7 @@ class AiDiagnosisClientImplTest {
         assertEquals(0, result.getEvidenceValidation().getDropped());
         assertEquals(0, result.getEvidenceValidation().getOverLimit());
         assertEquals("v2-2.1", result.getContextVersion());
-        assertEquals(42L, result.getIncidentId());
+        assertEquals(9001L, result.getIncidentId());
         assertEquals("INVENTORY_MISMATCH", result.getIncidentType());
     }
 
@@ -576,7 +710,7 @@ class AiDiagnosisClientImplTest {
                 .setBuiltAt(Instant.parse("2026-09-23T14:00:00Z"))
                 .setIncident(new IncidentContext.IncidentEvidence()
                         .setObservedAt(Instant.parse("2026-09-23T14:00:00Z"))
-                        .setIncidentId(42L)
+                        .setIncidentId(9001L)
                         .setIncidentType("INVENTORY_MISMATCH"));
     }
 }

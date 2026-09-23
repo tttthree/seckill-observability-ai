@@ -115,6 +115,35 @@ class AiDiagnosisJsonContractTest {
     }
 
     @Test
+    void shouldAlwaysSerializeHttpStatusZeroWhenNoResponseReceived() throws Exception {
+        // 未收到任何 HTTP 响应：http_status 必须是 0，不得为 null、不得缺字段
+        AiDiagnosisResult result = AiDiagnosisResult.localUnavailable(
+                "v2-2.1", 9001L, "INVENTORY_MISMATCH",
+                "AI_SERVICE_CONNECT_TIMEOUT", null, null, 2, 4012L);
+
+        JsonNode node = objectMapper.readTree(objectMapper.writeValueAsString(result));
+
+        assertTrue(node.has("http_status"), "http_status 不得缺字段");
+        assertFalse(node.get("http_status").isNull(), "http_status 不得为 null");
+        assertEquals(0, node.get("http_status").asInt());
+        assertEquals(2, node.get("attempts").asInt());
+    }
+
+    @Test
+    void shouldSerializeHttpStatusWhenResponseReceived() throws Exception {
+        AiDiagnosisResult result = new AiDiagnosisResult();
+        result.setDiagnosisStatus(AiDiagnosisResult.STATUS_DIAGNOSED);
+        result.setContextVersion("v2-2.1");
+        result.setHttpStatus(200);
+        result.setAttempts(1);
+
+        JsonNode node = objectMapper.readTree(objectMapper.writeValueAsString(result));
+
+        assertEquals(200, node.get("http_status").asInt());
+        assertEquals(1, node.get("attempts").asInt());
+    }
+
+    @Test
     void shouldNotEmitPythonContractKeysMissingFromRealResponse() throws Exception {
         // 真实 DIAGNOSED 响应样例（字段名/类型来自 Python V2-3 实际输出）
         String body = "{\"diagnosis_status\":\"DIAGNOSED\",\"context_version\":\"v2-2.1\","
