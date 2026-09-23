@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_INSUFFICIENT_REASON = "模型判定给定证据不足以给出确定结论。"
 
+# Incident 主证据缺失时的稳定文案（不调用模型）
+INCIDENT_MISSING_REASON = "Incident 主证据不可用，无法进行事件级诊断"
+
 
 class UnsupportedContextVersion(Exception):
     """context_version 不在支持列表内（契约升级必须显式升版）。"""
@@ -88,7 +91,17 @@ class DiagnosisService:
                 context.context_version, self._settings.supported_versions
             )
 
-        # 2) 轻量长度保护（严格请求体限流留 V2-4）
+        # 2) Incident 主证据缺失：直接给出稳定的 INSUFFICIENT_EVIDENCE，不调用模型
+        if incident is None:
+            logger.info(
+                "diagnosis skipped: incident evidence missing context_version=%s",
+                context.context_version,
+            )
+            return self._insufficient_without_model(
+                context.context_version, started, INCIDENT_MISSING_REASON
+            )
+
+        # 3) 轻量长度保护（严格请求体限流留 V2-4）
         context_size = len(context.model_dump_json())
         if context_size > self._settings.max_context_chars:
             raise ContextTooLarge(context_size, self._settings.max_context_chars)
@@ -99,12 +112,12 @@ class DiagnosisService:
 
         base = {
             "context_version": context.context_version,
-            "incident_id": incident.incident_id if incident else 0,
-            "incident_type": incident.incident_type if incident else None,
+            "incident_id": incident.incident_id,
+            "incident_type": incident.incident_type,
             "prompt_version": PROMPT_VERSION,
         }
 
-        # 3) 单次模型调用
+        # 4) 单次模型调用
         try:
             raw = self._client.complete_json(prompt)
         except ModelCallError as exc:
@@ -141,21 +154,27 @@ class DiagnosisService:
         if status == DiagnosisStatus.DIAGNOSED.value:
             if not evidence:
                 status = DiagnosisStatus.INSUFFICIENT_EVIDENCE.value
-                root_cause = None
                 insufficient_reason = (
                     "模型给出 DIAGNOSED，但其 evidence 中没有任何可回溯到 IncidentContext 的 path。"
                 )
             elif root_cause is None:
                 status = DiagnosisStatus.INSUFFICIENT_EVIDENCE.value
                 insufficient_reason = "模型给出 DIAGNOSED，但 root_cause 为空。"
-        if status == DiagnosisStatus.INSUFFICIENT_EVIDENCE.value and insufficient_reason is None:
-            insufficient_reason = _DEFAULT_INSUFFICIENT_REASON
 
         # 7) 动作：截断 + 强制 requires_human
         actions = [
             RecommendedAction(action=a.action, rationale=a.rationale, requires_human=True)
             for a in parsed.recommended_actions[: self._settings.max_actions]
         ]
+
+        # 8) INSUFFICIENT_EVIDENCE 统一正规化：
+        #    无论是模型主动返回还是由 DIAGNOSED 降级而来，都不得携带 root_cause / actions / error_code；
+        #    已通过回校验的 evidence 可以保留。
+        if status == DiagnosisStatus.INSUFFICIENT_EVIDENCE.value:
+            root_cause = None
+            actions = []
+            if insufficient_reason is None:
+                insufficient_reason = _DEFAULT_INSUFFICIENT_REASON
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
@@ -182,6 +201,27 @@ class DiagnosisService:
             prompt_version=PROMPT_VERSION,
             diagnosed_at=datetime.now(timezone.utc),
             elapsed_ms=elapsed_ms,
+        )
+
+    def _insufficient_without_model(
+        self, context_version: str, started: float, reason: str
+    ) -> DiagnosisResult:
+        """主证据缺失时的稳定降级结果：不调用模型，incident_id / incident_type 均为 null。"""
+        return DiagnosisResult(
+            diagnosis_status=DiagnosisStatus.INSUFFICIENT_EVIDENCE.value,
+            context_version=context_version,
+            incident_id=None,
+            incident_type=None,
+            root_cause=None,
+            evidence=[],
+            recommended_actions=[],
+            insufficient_reason=reason,
+            error_code=None,
+            evidence_validation=EvidenceValidation(submitted=0, accepted=0, dropped=0),
+            model=self._settings.deepseek_model,
+            prompt_version=PROMPT_VERSION,
+            diagnosed_at=datetime.now(timezone.utc),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
         )
 
     def _unavailable(

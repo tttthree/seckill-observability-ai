@@ -145,3 +145,25 @@ def test_model_unavailable_still_returns_200(client_factory):
     assert body["diagnosis_status"] == "UNAVAILABLE"
     assert body["error_code"] == "MODEL_TIMEOUT"
     assert body["evidence"] == []
+
+
+def test_missing_incident_returns_stable_insufficient_evidence(http):
+    """incident=null：200 + INSUFFICIENT_EVIDENCE + incident_id=null，且不调用模型。"""
+    test_client, payload, restore = http
+    broken = copy.deepcopy(payload)
+    broken["incident"] = None
+    try:
+        response = test_client.post("/api/v1/diagnosis", json={"incident_context": broken})
+    finally:
+        restore()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["diagnosis_status"] == "INSUFFICIENT_EVIDENCE"
+    assert body["incident_id"] is None
+    assert body["incident_type"] is None
+    assert body["root_cause"] is None
+    assert body["evidence"] == []
+    assert body["recommended_actions"] == []
+    assert body["error_code"] is None
+    assert body["insufficient_reason"] == "Incident 主证据不可用，无法进行事件级诊断"

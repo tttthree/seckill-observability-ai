@@ -136,6 +136,82 @@ def test_insufficient_evidence_status_is_kept(context):
     assert result.error_code is None
 
 
+# ==================== V2-3.1：INSUFFICIENT_EVIDENCE 统一正规化 ====================
+
+
+def test_insufficient_evidence_strips_root_cause_and_actions(context):
+    """模型即使在 INSUFFICIENT_EVIDENCE 中给出 root_cause/actions，也不得进入最终结果。"""
+    payload = {
+        "diagnosis_status": "INSUFFICIENT_EVIDENCE",
+        "root_cause": "模型自作主张的根因",
+        "evidence": [{"path": "incident.status", "note": "事件状态"}],
+        "recommended_actions": [{"action": "重启消费者", "rationale": "猜测"}],
+        "insufficient_reason": "缺少 Redis 证据",
+    }
+    service, _, _ = make_service(payload=payload)
+
+    result = service.diagnose(context)
+
+    assert result.diagnosis_status == "INSUFFICIENT_EVIDENCE"
+    assert result.root_cause is None
+    assert result.recommended_actions == []
+    assert result.error_code is None
+    # 已通过回校验的 evidence 允许保留
+    assert [e.path for e in result.evidence] == ["incident.status"]
+    assert result.insufficient_reason == "缺少 Redis 证据"
+
+
+def test_downgraded_insufficient_evidence_is_normalized(context):
+    """由 DIAGNOSED 降级而来时同样必须清空 root_cause 与 actions。"""
+    payload = {
+        "diagnosis_status": "DIAGNOSED",
+        "root_cause": "看似有根因",
+        "evidence": [{"path": "redis.invented", "note": "编造"}],
+        "recommended_actions": [{"action": "自动回滚库存", "rationale": "猜测"}],
+        "insufficient_reason": None,
+    }
+    service, _, _ = make_service(payload=payload)
+
+    result = service.diagnose(context)
+
+    assert result.diagnosis_status == "INSUFFICIENT_EVIDENCE"
+    assert result.root_cause is None
+    assert result.recommended_actions == []
+    assert result.error_code is None
+    assert result.insufficient_reason
+
+
+def test_incident_missing_skips_model_and_returns_stable_result(context_payload):
+    """incident=null：不调用模型，返回稳定的 INSUFFICIENT_EVIDENCE。"""
+    payload = dict(context_payload)
+    payload["incident"] = None
+    context_without_incident = IncidentContext.model_validate(payload)
+    service, client, _ = make_service(payload=GOOD_LLM)
+
+    result = service.diagnose(context_without_incident)
+
+    assert client.calls == 0, "Incident 主证据缺失时禁止调用模型"
+    assert result.diagnosis_status == "INSUFFICIENT_EVIDENCE"
+    assert result.incident_id is None
+    assert result.incident_type is None
+    assert result.root_cause is None
+    assert result.evidence == []
+    assert result.recommended_actions == []
+    assert result.error_code is None
+    assert result.insufficient_reason == "Incident 主证据不可用，无法进行事件级诊断"
+    assert result.evidence_validation.submitted == 0
+
+
+def test_incident_id_is_real_value_not_sentinel(context):
+    """正常事件仍返回真实 id，禁止把 0 当哨兵。"""
+    service, _, _ = make_service(payload=GOOD_LLM)
+
+    result = service.diagnose(context)
+
+    assert result.incident_id == context.incident.incident_id
+    assert result.incident_id != 0
+
+
 def test_insufficient_evidence_gets_default_reason(context):
     payload = {
         "diagnosis_status": "INSUFFICIENT_EVIDENCE",

@@ -109,7 +109,8 @@ class EvidenceValidation(_StrictModel):
 class DiagnosisResult(_StrictModel):
     diagnosis_status: Literal["DIAGNOSED", "INSUFFICIENT_EVIDENCE", "UNAVAILABLE"]
     context_version: str
-    incident_id: int
+    # Incident 主证据缺失时可为 null（禁止用 0 作为哨兵值）
+    incident_id: Optional[int]
     incident_type: Optional[str]
     root_cause: Optional[str]
     evidence: List[Evidence]

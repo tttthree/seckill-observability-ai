@@ -87,7 +87,11 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
 | 模型输出非 JSON | 200 | `UNAVAILABLE` | `MODEL_OUTPUT_INVALID`（不重试） |
 | 模型判证据不足 | 200 | `INSUFFICIENT_EVIDENCE` | `null` |
 | `DIAGNOSED` 但 evidence 全不可回溯 | 200 | `INSUFFICIENT_EVIDENCE` | `null` |
+| **`incident` 主证据缺失（`incident=null`）** | 200 | `INSUFFICIENT_EVIDENCE` | `null`（**不调用模型**，`incident_id`/`incident_type` 为 `null`） |
 | 未预期内部错误 | 500 | — | `INTERNAL`（原始异常只进日志） |
+
+`INSUFFICIENT_EVIDENCE` 统一正规化：无论模型主动返回还是由 `DIAGNOSED` 降级而来，最终响应一律
+`root_cause=null`、`recommended_actions=[]`、`error_code=null`（已通过回校验的 `evidence` 保留）。
 
 ## 防幻觉机制
 
@@ -97,6 +101,9 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
 
 - 能回溯 → 保留，并把 `observed` **覆盖为 Context 真实值**（模型给的值不被信任）；
 - 不能回溯 → 丢弃并计入 `evidence_validation.dropped`；
+- **`metrics.counters.<name>` 形态的路径由代码强制 `counter_presence` 语义**：
+  必须 `metrics.counter_presence.<name>` **严格为 true** 才可通过；
+  `presence=false` / 缺失 / 无法解析一律 dropped（不依赖 system prompt）；
 - `DIAGNOSED` 但没有任何可回溯证据 → 强制降级为 `INSUFFICIENT_EVIDENCE`。
 
 ## 测试
