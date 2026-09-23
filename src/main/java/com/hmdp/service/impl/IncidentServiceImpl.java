@@ -98,6 +98,12 @@ public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> i
             try {
                 int retried = aggregateOpenIncident(openKey, report, now);
                 log.info("故障事件并发创建冲突，已聚合到既有 OPEN 事件 openKey={}, rows={}", openKey, retried);
+                // 聚合命中既有 OPEN 事件后，本次级别必须同样参与原子升级：
+                // 否则"低级别抢先插入成功、高级别撞唯一索引只聚合"会让 severity 停留在低级别，
+                // 绕过 severity 单调不降的保证。这里仍复用同一条条件 UPDATE，不恢复 SELECT→比较→UPDATE。
+                if (retried > 0) {
+                    escalateSeverityIfNeeded(openKey, report.getSeverity());
+                }
             } catch (Exception retryError) {
                 log.warn("故障事件并发冲突后聚合失败 openKey={}", openKey, retryError);
             }

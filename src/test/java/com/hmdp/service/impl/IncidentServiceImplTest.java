@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -133,14 +134,82 @@ class IncidentServiceImplTest {
     /** 并发竞态：插入撞唯一索引时回退为聚合更新，不抛异常 */
     @Test
     void shouldFallBackToAggregationWhenConcurrentInsertConflicts() {
-        when(incidentMapper.update(any(), any())).thenReturn(0, 1);
+        // 第 1 次聚合 0 行 → 插入撞唯一索引 → 重试聚合命中 → 条件升级
+        when(incidentMapper.update(any(), any())).thenReturn(0, 1, 1);
         when(incidentMapper.insert(any(Incident.class)))
                 .thenThrow(new DuplicateKeyException("uk_incident_open"));
 
         assertNull(service.report(inventoryMismatchReport()));
 
         verify(incidentMapper, times(1)).insert(any(Incident.class));
-        verify(incidentMapper, times(2)).update(any(), any());
+        verify(incidentMapper, times(3)).update(any(), any());
+    }
+
+    /**
+     * V2-1.1 patch：并发首次创建时的级别升级不得丢失。
+     * 完整路径：首次 aggregate=0 → insert 抛 DuplicateKey → retry aggregate=1 → 高级别原子升级。
+     */
+    @SuppressWarnings("unchecked")
+    @Test
+    void shouldEscalateSeverityAfterDuplicateKeyConflict() {
+        when(incidentMapper.update(any(), any())).thenReturn(0, 1, 1);
+        when(incidentMapper.insert(any(Incident.class)))
+                .thenThrow(new DuplicateKeyException("uk_incident_open"));
+
+        assertNull(service.report(reportWithSeverity(IncidentSeverity.CRITICAL)));
+
+        ArgumentCaptor<Wrapper<Incident>> captor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(incidentMapper, times(3)).update(any(), captor.capture());
+        verify(incidentMapper, never()).selectOne(any());
+
+        // 第 3 条语句必须是"原子条件升级"，且绑定本次的高级别序号
+        LambdaUpdateWrapper<Incident> escalation =
+                (LambdaUpdateWrapper<Incident>) captor.getAllValues().get(2);
+        assertTrue(escalation.getSqlSet().contains("severity"),
+                "撞唯一索引后必须继续执行级别升级: " + escalation.getSqlSet());
+        assertTrue(escalation.getSqlSegment().contains("CASE severity"),
+                "升级条件必须由数据库比较级别序号: " + escalation.getSqlSegment());
+        assertTrue(escalation.getParamNameValuePairs()
+                        .containsValue(IncidentSeverity.CRITICAL.getRank()),
+                "升级条件必须绑定 CRITICAL 序号: " + escalation.getParamNameValuePairs());
+    }
+
+    /**
+     * V2-1.1 patch 语义验证：线程 A 以 MEDIUM 抢先插入成功，本线程以 CRITICAL 撞唯一索引，
+     * 最终级别必须收敛到 CRITICAL（而不是停留在 MEDIUM）。
+     */
+    @Test
+    void shouldNotLoseHigherSeverityWhenInsertConflictsWithLowerLevelWinner() {
+        storedSeverity = IncidentSeverity.MEDIUM; // 模拟 A 已插入的 OPEN 事件级别
+        escalationAttempts.clear();
+        AtomicInteger aggregateCalls = new AtomicInteger();
+
+        doAnswer(invocation -> {
+            Wrapper<Incident> wrapper = invocation.getArgument(1);
+            String sqlSet = ((AbstractWrapper<Incident, ?, ?>) wrapper).getSqlSet();
+
+            if (sqlSet.contains("occurrence_count")) {
+                // 首次聚合看不到 A 的未提交记录（0 行）；retry 聚合命中既有 OPEN 事件
+                return aggregateCalls.incrementAndGet() == 1 ? 0 : 1;
+            }
+
+            wrapper.getSqlSegment();
+            IncidentSeverity target = targetSeverity(wrapper);
+            escalationAttempts.add(target);
+            if (target != null && storedSeverity != null && storedSeverity.getRank() < target.getRank()) {
+                storedSeverity = target;
+                return 1;
+            }
+            return 0;
+        }).when(incidentMapper).update(any(), any());
+        when(incidentMapper.insert(any(Incident.class)))
+                .thenThrow(new DuplicateKeyException("uk_incident_open"));
+
+        assertNull(service.report(reportWithSeverity(IncidentSeverity.CRITICAL)));
+
+        assertEquals(IncidentSeverity.CRITICAL, storedSeverity,
+                "撞唯一索引后不得丢失更高级别，否则会绕过 severity 单调不降的保证");
+        assertEquals(List.of(IncidentSeverity.CRITICAL), escalationAttempts);
     }
 
     /** Case 4：恢复 → OPEN 置为 RESOLVED 并释放 open_key；重复调用幂等 */
