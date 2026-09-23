@@ -71,6 +71,55 @@ def test_diagnosis_happy_path(http):
     assert body["evidence"][0]["observed"] == "RESOLVED"
     assert body["recommended_actions"][0]["requires_human"] is True
     assert body["error_code"] is None
+    # V2-3.3：HTTP 契约必须显式给出 over_limit（与 dropped 分离）
+    assert body["evidence_validation"] == {
+        "submitted": 1,
+        "accepted": 1,
+        "dropped": 0,
+        "over_limit": 0,
+    }
+
+
+def test_api_separates_over_limit_from_dropped(client_factory):
+    """V2-3.3：12 条全合法证据 + 上限 10 → HTTP 响应 accepted=10 / dropped=0 / over_limit=2。"""
+    valid_paths = [
+        "incident.status",
+        "incident.incident_id",
+        "incident.severity",
+        "incident.source",
+        "incident.business_key",
+        "incident.occurrence_count",
+        "incident.detected_snapshot.redis_stock",
+        "incident.detected_snapshot.db_stock",
+        "incident.detected_snapshot.deviation",
+        "redis.voucher_stock.value",
+        "database.seckill_voucher.stock",
+        "metrics.counters.total_requests",
+    ]
+    payload = dict(GOOD_LLM)
+    payload["evidence"] = [{"path": p, "note": None} for p in valid_paths]
+
+    test_client, request_payload, restore = client_factory(
+        Settings(max_evidence_items=10), StubDeepSeekClient(payload=payload)
+    )
+    try:
+        response = test_client.post(
+            "/api/v1/diagnosis", json={"incident_context": request_payload}
+        )
+    finally:
+        restore()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["diagnosis_status"] == "DIAGNOSED"
+    assert body["evidence_validation"] == {
+        "submitted": 12,
+        "accepted": 10,
+        "dropped": 0,
+        "over_limit": 2,
+    }
+    assert len(body["evidence"]) == 10
+    assert [e["path"] for e in body["evidence"]] == valid_paths[:10]
 
 
 def test_invalid_contract_returns_422_without_echoing_input(http, ):

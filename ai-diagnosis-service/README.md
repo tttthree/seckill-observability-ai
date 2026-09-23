@@ -57,7 +57,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
   ],
   "insufficient_reason": null,
   "error_code": null,
-  "evidence_validation": {"submitted": 2, "accepted": 2, "dropped": 0},
+  "evidence_validation": {"submitted": 2, "accepted": 2, "dropped": 0, "over_limit": 0},
   "model": "deepseek-flash",
   "prompt_version": "v2-3.1",
   "diagnosed_at": "2026-01-15T08:00:12.345Z",
@@ -105,6 +105,29 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
   必须 `metrics.counter_presence.<name>` **严格为 true** 才可通过；
   `presence=false` / 缺失 / 无法解析一律 dropped（不依赖 system prompt）；
 - `DIAGNOSED` 但没有任何可回溯证据 → 强制降级为 `INSUFFICIENT_EVIDENCE`。
+
+### `evidence_validation`：dropped 与 over_limit 的区别（V2-3.3）
+
+模型提交的**每一条** `evidence` 都会走完整校验链（`parse → resolve → duplicate → counter_presence`），
+**不会因为数量达到上限而提前停止校验**。三种去向互斥且穷尽，冻结全局不变量：
+
+```
+submitted == accepted + dropped + over_limit
+```
+
+| 字段 | 含义 |
+|---|---|
+| `submitted` | 模型提交的 evidence 总条数 |
+| `accepted` | 通过全部校验、并进入最终 `evidence` 的条数 |
+| `dropped` | **被校验拒绝**：path 语法非法 / path 不存在 / duplicate path / `counter_presence` 不严格为 true |
+| `over_limit` | **条目本身完全合法**，但 `accepted` 已达 `MAX_EVIDENCE_ITEMS`，因此未进入最终 `evidence`（**不是错误**） |
+
+因此：
+
+- `dropped > 0` 表示模型编造或重复引用了证据，是**质量信号**；
+- `over_limit > 0` 只表示有效证据多于输出上限（`MAX_EVIDENCE_ITEMS`，默认 10），是**截断信号**，不代表模型出错；
+- 上限不改变判定语义：达到上限后提交的非法条目仍计入 `dropped`（不会因为"超限"而免检）；
+  重复路径也以"已通过 parse/resolve 的路径"为准，超限区间内的重复同样计入 `dropped`。
 
 ## 测试
 

@@ -7,11 +7,12 @@
 
 规则：
 - 属性访问只能落在对象上；下标访问只能落在数组上；
-- 路径不存在 / 语法非法 → 该条证据被丢弃并计入 dropped；
+- path 不存在 / 语法非法 → 该条证据被丢弃并计入 dropped；
 - 校验通过的证据，`observed` 一律取自 **Context 真实值**（模型给的值不被信任）；
 - **counter_presence 语义由代码强制**：形如 `metrics.counters.<name>` 的路径，
   必须 `metrics.counter_presence.<name>` 严格为 true 才可通过；
-  presence 为 false / 缺失 / 无法解析时一律 dropped（不得只依赖 system prompt）。
+  presence 为 false / 缺失 / 无法解析时一律 dropped（不得只依赖 system prompt）；
+- 上限（max_items）只决定"是否进入最终 evidence"，超限的合法条目计入 over_limit，不计入 dropped。
 """
 
 import re
@@ -125,33 +126,58 @@ def validate_evidence(
     items: List[LLMEvidence],
     max_items: int,
 ) -> tuple[List[Evidence], EvidenceValidation]:
-    """回校验模型给出的证据，返回（可用证据, 统计）。
+    """回校验**全部** submitted 证据，返回（进入最终结果的证据, 统计）。
 
-    被丢弃的情形：path 语法非法 / path 不存在 / counter 路径的 counter_presence 不是严格 true。
-    重复 path 会被去重（保留第一条），其后的重复项同样计入 dropped。
+    每条证据都会依次经过：parse → resolve → duplicate → counter_presence。
+    三种去向互斥且穷尽（冻结不变量 submitted == accepted + dropped + over_limit）：
+
+    - dropped   ：被校验拒绝 —— path 语法非法 / path 不存在 / duplicate path /
+                  metrics.counters.<name> 的 counter_presence 不严格为 true；
+    - accepted  ：通过全部校验且未触及上限，进入最终 evidence；
+    - over_limit：通过全部校验，但 accepted 已达 max_items，故不进入最终 evidence（**不是错误**）。
+
+    注意：达到上限后**不会提前跳出**——超限部分仍会被完整校验，
+    因此其中的 duplicate / presence 违规会被正确计入 dropped。
     """
     accepted: List[Evidence] = []
     seen_paths: set[str] = set()
     submitted = len(items)
+    dropped = 0
+    over_limit = 0
 
     for item in items:
-        if len(accepted) >= max_items:
-            break
         path = item.path
-        if path in seen_paths:
-            continue
+
+        # 1) 语法 + 2) 回溯 Context
         try:
             tokens = parse_path(path)
             observed = resolve_tokens(context_json, tokens, path)
         except (PathSyntaxError, PathNotFound):
+            dropped += 1
             continue
-        if not counter_presence_allows(context_json, tokens):
+
+        # 3) duplicate path：以"已通过 parse/resolve 的路径"为准
+        #    （无论后续是否通过 counter_presence 或是否超限，都先占用该 path）
+        if path in seen_paths:
+            dropped += 1
             continue
         seen_paths.add(path)
+
+        # 4) counter_presence 闸门（metrics.counters.<name> 必须严格 true）
+        if not counter_presence_allows(context_json, tokens):
+            dropped += 1
+            continue
+
+        # 5) 上限：有效但未进入最终 evidence
+        if len(accepted) >= max_items:
+            over_limit += 1
+            continue
+
         accepted.append(Evidence(path=path, observed=observed, note=item.note))
 
     return accepted, EvidenceValidation(
         submitted=submitted,
         accepted=len(accepted),
-        dropped=submitted - len(accepted),
+        dropped=dropped,
+        over_limit=over_limit,
     )

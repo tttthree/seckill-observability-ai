@@ -2,6 +2,7 @@
 
 import pytest
 
+from conftest import assert_submitted_invariant
 from models.diagnosis import LLMEvidence
 from services.evidence_validator import (
     PathNotFound,
@@ -74,6 +75,8 @@ def test_observed_comes_from_context_not_from_model():
     assert accepted[0].observed == "RESOLVED"
     assert accepted[0].note == "事件已恢复"
     assert validation.submitted == 1 and validation.accepted == 1 and validation.dropped == 0
+    assert validation.over_limit == 0
+    assert_submitted_invariant(validation)
 
 
 def test_indexed_evidence_observed_is_real_element_value():
@@ -92,6 +95,8 @@ def test_invalid_paths_are_dropped_and_counted():
     accepted, validation = validate_evidence(CONTEXT, items, max_items=10)
     assert [e.path for e in accepted] == ["incident.status"]
     assert validation.submitted == 4 and validation.accepted == 1 and validation.dropped == 3
+    assert validation.over_limit == 0
+    assert_submitted_invariant(validation)
 
 
 def test_duplicate_paths_are_deduped():
@@ -103,15 +108,20 @@ def test_duplicate_paths_are_deduped():
     assert len(accepted) == 1
     assert accepted[0].note == "first"
     assert validation.dropped == 1
+    assert_submitted_invariant(validation)
 
 
 def test_evidence_items_are_capped():
-    """上限按"可回溯的不同证据"计算；超出部分计入 dropped。"""
+    """上限只决定"是否进入最终 evidence"：超限的**合法**条目计入 over_limit，不是 dropped。"""
     big_context = {"items": [{"id": i} for i in range(15)]}
     items = [LLMEvidence(path=f"items[{i}].id", note=f"n{i}") for i in range(15)]
     accepted, validation = validate_evidence(big_context, items, max_items=3)
     assert [e.observed for e in accepted] == [0, 1, 2]
-    assert validation.submitted == 15 and validation.accepted == 3 and validation.dropped == 12
+    assert validation.submitted == 15
+    assert validation.accepted == 3
+    assert validation.dropped == 0
+    assert validation.over_limit == 12
+    assert_submitted_invariant(validation)
 
 
 # ==================== V2-3.1：counter_presence 由代码强制 ====================
@@ -180,6 +190,8 @@ def test_counter_presence_gate_mixed_statistics():
     assert validation.submitted == 4
     assert validation.accepted == 2
     assert validation.dropped == 2
+    assert validation.over_limit == 0
+    assert_submitted_invariant(validation)
 
 
 def test_non_counter_paths_are_unaffected_by_presence_gate():
@@ -204,3 +216,88 @@ def test_counter_presence_gate_on_real_fixture(context_payload):
 
     assert [e.path for e in accepted] == ["metrics.counters.total_requests"]
     assert validation.accepted == 1 and validation.dropped == 1
+    assert_submitted_invariant(validation)
+
+
+# ==================== V2-3.3：over_limit 与 dropped 分离 ====================
+#
+# dropped    = 校验拒绝（语法/不存在/重复/counter_presence 不通过）
+# over_limit = 校验全部通过，但 accepted 已达 max_evidence_items，故未进入最终 evidence
+# 冻结不变量：submitted == accepted + dropped + over_limit
+
+
+def test_valid_items_beyond_cap_are_over_limit_not_dropped():
+    """12 条全合法 + 上限 10 → accepted=10 / dropped=0 / over_limit=2（这是 V2-3.3 的核心修复）。"""
+    context = {"items": [{"id": i} for i in range(12)]}
+    items = [LLMEvidence(path=f"items[{i}].id", note=f"n{i}") for i in range(12)]
+    accepted, validation = validate_evidence(context, items, max_items=10)
+
+    assert [e.observed for e in accepted] == list(range(10))
+    assert validation.submitted == 12
+    assert validation.accepted == 10
+    assert validation.dropped == 0, "合法证据超限不得计入 dropped"
+    assert validation.over_limit == 2
+    assert_submitted_invariant(validation)
+
+
+def test_invalid_item_beyond_cap_is_still_dropped():
+    """上限之后仍有非法条目时：非法 → dropped，合法 → over_limit（不得因超限而跳过校验）。"""
+    context = {"items": [{"id": i} for i in range(12)]}
+    items = [LLMEvidence(path=f"items[{i}].id", note="valid") for i in range(10)]
+    items.append(LLMEvidence(path="items[99].id", note="index out of range"))
+    items.append(LLMEvidence(path="items[11].id", note="valid but over limit"))
+
+    accepted, validation = validate_evidence(context, items, max_items=10)
+
+    assert len(accepted) == 10
+    assert validation.submitted == 12
+    assert validation.accepted == 10
+    assert validation.dropped == 1
+    assert validation.over_limit == 1
+    assert_submitted_invariant(validation)
+
+
+def test_duplicate_and_presence_failure_beyond_cap_are_dropped_not_over_limit():
+    """超限区间的 duplicate / counter_presence 违规仍必须走完整校验链并计入 dropped。"""
+    context = {
+        "items": [{"id": i} for i in range(5)],
+        "metrics": {
+            "counters": {"total_requests": 0, "consume_error": 0},
+            "counter_presence": {"total_requests": True, "consume_error": False},
+        },
+    }
+    items = [
+        LLMEvidence(path="items[0].id", note="accepted"),
+        LLMEvidence(path="items[1].id", note="accepted"),
+        LLMEvidence(path="metrics.counters.total_requests", note="accepted"),
+        # --- 以下三条均已超出 max_items=3 ---
+        LLMEvidence(path="items[0].id", note="duplicate -> dropped"),
+        LLMEvidence(path="metrics.counters.consume_error", note="presence=false -> dropped"),
+        LLMEvidence(path="items[4].id", note="valid -> over_limit"),
+    ]
+    accepted, validation = validate_evidence(context, items, max_items=3)
+
+    assert [e.path for e in accepted] == [
+        "items[0].id",
+        "items[1].id",
+        "metrics.counters.total_requests",
+    ]
+    assert validation.submitted == 6
+    assert validation.accepted == 3
+    assert validation.dropped == 2
+    assert validation.over_limit == 1
+    assert_submitted_invariant(validation)
+
+
+@pytest.mark.parametrize(
+    ("item_count", "max_items"),
+    [(0, 10), (1, 10), (10, 10), (11, 10), (12, 10), (25, 10), (5, 0)],
+)
+def test_submitted_invariant_holds_across_caps(item_count, max_items):
+    """跨上限边界的全局不变量回归。"""
+    context = {"items": [{"id": i} for i in range(max(item_count, 1))]}
+    items = [LLMEvidence(path=f"items[{i}].id", note=None) for i in range(item_count)]
+    accepted, validation = validate_evidence(context, items, max_items=max_items)
+
+    assert len(accepted) == min(item_count, max_items)
+    assert_submitted_invariant(validation)

@@ -232,7 +232,9 @@ class DiagnosisService:
             recommended_actions=[],
             insufficient_reason=reason,
             error_code=None,
-            evidence_validation=EvidenceValidation(submitted=0, accepted=0, dropped=0),
+            evidence_validation=EvidenceValidation(
+                submitted=0, accepted=0, dropped=0, over_limit=0
+            ),
             model=self._settings.deepseek_model,
             prompt_version=PROMPT_VERSION,
             diagnosed_at=datetime.now(timezone.utc),
@@ -252,7 +254,9 @@ class DiagnosisService:
             recommended_actions=[],
             insufficient_reason=None,
             error_code=code.value,
-            evidence_validation=EvidenceValidation(submitted=0, accepted=0, dropped=0),
+            evidence_validation=EvidenceValidation(
+                submitted=0, accepted=0, dropped=0, over_limit=0
+            ),
             model=self._settings.deepseek_model,
             prompt_version=PROMPT_VERSION,
             diagnosed_at=datetime.now(timezone.utc),

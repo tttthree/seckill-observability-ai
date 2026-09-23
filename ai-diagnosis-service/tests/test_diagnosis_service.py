@@ -5,7 +5,7 @@ import logging
 import pytest
 
 from config import Settings
-from conftest import StubDeepSeekClient
+from conftest import StubDeepSeekClient, assert_submitted_invariant
 from models.context import IncidentContext
 from models.diagnosis import ErrorCode
 from services.deepseek_client import DeepSeekClient, ModelCallError
@@ -59,6 +59,8 @@ def test_diagnosed_result_metadata_is_generated_by_service(context):
     assert result.evidence_validation.submitted == 3
     assert result.evidence_validation.accepted == 3
     assert result.evidence_validation.dropped == 0
+    assert result.evidence_validation.over_limit == 0
+    assert_submitted_invariant(result.evidence_validation)
 
 
 def test_action_requires_human_is_forced_by_service(context):
@@ -108,6 +110,7 @@ def test_diagnosed_with_bogus_paths_is_downgraded(context):
     assert result.insufficient_reason
     assert result.evidence == []
     assert result.evidence_validation.dropped == 1
+    assert_submitted_invariant(result.evidence_validation)
 
 
 def test_diagnosed_without_root_cause_is_downgraded(context):
@@ -202,6 +205,8 @@ def test_incident_missing_skips_model_and_returns_stable_result(context_payload)
     assert result.error_code is None
     assert result.insufficient_reason == "Incident 主证据不可用，无法进行事件级诊断"
     assert result.evidence_validation.submitted == 0
+    assert result.evidence_validation.over_limit == 0
+    assert_submitted_invariant(result.evidence_validation)
 
 
 def test_incident_id_is_real_value_not_sentinel(context):

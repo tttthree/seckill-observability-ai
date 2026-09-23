@@ -15,6 +15,19 @@ def load_fixture(name: str) -> dict:
     return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
+def assert_submitted_invariant(validation) -> None:
+    """V2-3.3 冻结不变量：每条 submitted 证据必须恰好落入三种去向之一。
+
+    submitted == accepted（进入最终 evidence）+ dropped（校验拒绝）+ over_limit（合法但被输出上限截断）
+    """
+    assert validation.submitted == (
+        validation.accepted + validation.dropped + validation.over_limit
+    ), (
+        f"submitted={validation.submitted} != accepted={validation.accepted} "
+        f"+ dropped={validation.dropped} + over_limit={validation.over_limit}"
+    )
+
+
 @pytest.fixture
 def context_payload() -> dict:
     """V2-2.1 冻结契约的真实（已脱敏）样本。"""
