@@ -351,7 +351,88 @@ JSON 解析 → evidence.path 回校验（observed 取 Context 真实值）→ D
 
 retry / 限流 / 熔断 / 诊断结果持久化 / Java 调用方接入 → 留到 V2-4。
 
-## 11. 数据库
+## 11. Java ↔ Python 集成（V2-4）
+
+Java 侧新增管理员接口，把「真实故障证据」交给独立 Python 服务做结构化诊断：
+
+```text
+GET /admin/incidents/{id}/diagnosis      （X-Admin-Token，继承 /admin/incidents/** 规则）
+        │
+        ├─ IncidentContextBuilder.build(id)          ← 复用 V2-2，只读采集真实证据
+        │     └─ Incident 不存在 → 404 INCIDENT_NOT_FOUND（不调用 Python）
+        ▼
+Sentinel 限流（资源 incident-diagnosis，默认 1 QPS）
+        │  被限流 → 200 + UNAVAILABLE + AI_RATE_LIMITED（attempts=0，不调用 Python）
+        ▼
+AiDiagnosisClientImpl
+        │  POST {ai-diagnosis.url}  {"incident_context": {...}}
+        │  connect 2s / read 45s；有界重试（见 11.3）
+        ▼
+Python V2-3 DiagnosisService → DiagnosisResult
+        │  200：类型化透传（含 V2-3 冻结语义校验）
+        └─ 失败：Java 本地降级为 200 + UNAVAILABLE + AI_*
+```
+
+### 11.1 边界
+
+- 零新增 Maven 依赖（`RestTemplate` + Spring Boot 注入的 `ObjectMapper`）；不引入 WebClient / Feign / Spring Retry / Resilience4j / 熔断器框架；
+- 只读：不 resolve Incident、不改库存、不 ACK、不自动执行任何修复动作；
+- **不改动 Python（V2-3）与 V2-1/V2-2 冻结逻辑**，也不复制修改 V2-2 `IncidentContext` 契约（请求体直接复用同一 DTO）；
+- 诊断接口是独立只读端点，**不在秒杀主链路上**；AI 失败只影响该端点，且客户端**永不抛异常**；
+- 不做 RAG / 向量库 / Runbook / 持久化 / Vue / Docker（V2-5 及以后）。
+
+### 11.2 类型化契约与错误码归属
+
+响应 DTO `com.hmdp.dto.diagnosis.AiDiagnosisResult` 是 Python `DiagnosisResult` 的**类型化镜像**（含 `evidence_validation.submitted/accepted/dropped/over_limit`），另有 4 个 Java 集成层遥测字段（仅 `error_origin`/`python_error_code`/`http_status` 在失败时出现）：
+
+| 字段 | 来源 | 说明 |
+|---|---|---|
+| `diagnosis_status` / `context_version` / `incident_id` / `incident_type` / `root_cause` / `evidence[]` / `recommended_actions[]` / `insufficient_reason` / `error_code` / `evidence_validation` / `model` / `prompt_version` / `diagnosed_at` / `elapsed_ms` | Python | 原样透传；`observed` 用 `Object`（真实值类型不定） |
+| `error_origin` | Java | `PYTHON`（错误码来自 Python）/ `JAVA_INTEGRATION` |
+| `python_error_code` | Java | Java 降级时保留 Python 错误体的 `error_code`（如 `INVALID_CONTEXT`），不丢线索 |
+| `http_status` | Java | Java 降级时实际收到的状态码；未收到响应为 0 |
+| `attempts` | Java | 实际尝试次数；未发起调用（禁用/限流）为 0 |
+
+**错误码命名约定**：`AI_*` 前缀**只由 Java 集成层生成**（`AI_SERVICE_DISABLED` / `AI_RATE_LIMITED` / `AI_SERVICE_CONNECT_TIMEOUT` / `AI_SERVICE_READ_TIMEOUT` / `AI_SERVICE_UNREACHABLE` / `AI_SERVICE_UNAVAILABLE` / `AI_SERVICE_HTTP_5XX` / `AI_SERVICE_HTTP_4XX` / `AI_SERVICE_REQUEST_REJECTED` / `AI_RESPONSE_INVALID` / `AI_REQUEST_INVALID`）；其余取值均为 Python `ErrorCode` 原样返回。
+
+### 11.3 失败语义与重试边界（有界，不泛化成容错平台）
+
+| 场景 | Java 行为 | error_code | 是否重试 |
+|---|---|---|---|
+| Python 200 `DIAGNOSED` / `INSUFFICIENT_EVIDENCE` | 类型化透传 | Python 原值（通常 `null`） | — |
+| Python 200 `UNAVAILABLE` | 透传（服务可达，模型侧降级） | Python 原值（`MODEL_*`） | 否 |
+| 200 但响应违反冻结语义 / 不可解析 / 空体 | 本地降级 | `AI_RESPONSE_INVALID` | 否 |
+| 4xx（422 / 413） | 本地降级 | `AI_SERVICE_REQUEST_REJECTED`（+`python_error_code`） | 否 |
+| 其它 4xx | 本地降级 | `AI_SERVICE_HTTP_4XX` | 否 |
+| 500 | 本地降级 | `AI_SERVICE_HTTP_5XX` | 否 |
+| **502 / 503 / 504** | 重试 1 次；仍失败则本地降级 | `AI_SERVICE_HTTP_5XX` | **是（≤1 次）** |
+| connect timeout | 重试 1 次；仍失败则本地降级 | `AI_SERVICE_CONNECT_TIMEOUT` | **是（≤1 次）** |
+| connection refused / unknown host | 重试 1 次；仍失败则本地降级 | `AI_SERVICE_UNREACHABLE` | **是（≤1 次）** |
+| **read timeout** | 本地降级 | `AI_SERVICE_READ_TIMEOUT` | **否** |
+| 其它 I/O 失败 | 本地降级 | `AI_SERVICE_UNAVAILABLE` | 否 |
+| `ai-diagnosis.enabled=false` | 本地降级，不发起 HTTP | `AI_SERVICE_DISABLED` | 否（attempts=0） |
+| Sentinel 限流 | 本地降级，不发起 HTTP | `AI_RATE_LIMITED` | 否（attempts=0） |
+
+Java 本地降级结果的冻结语义：`diagnosis_status=UNAVAILABLE`、`root_cause=null`、`evidence=[]`、`recommended_actions=[]`、`evidence_validation` 全 0、`model`/`prompt_version`/`diagnosed_at` **一律为 null**（不伪造 Python/模型侧信息），`elapsed_ms` 为 Java 实测值。任何失败都**不得**返回 `DIAGNOSED`，HTTP 一律 200。
+
+`HttpURLConnection` 不暴露超时阶段，connect / read 超时按异常类型与消息 best-effort 区分；无法判定时按 read timeout 处理（不重试）——宁可少一次重试，也不违反「read timeout 不重试」。
+
+### 11.4 超时、重试与限流参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `ai-diagnosis.enabled` | `true` | false 时直接本地降级 |
+| `ai-diagnosis.url` | `http://127.0.0.1:8000/api/v1/diagnosis` | Python V2-3 端点 |
+| `ai-diagnosis.connect-timeout-ms` | `2000` | 独立 `@Bean("aiDiagnosisRestTemplate")`，不复用全局 RestTemplate |
+| `ai-diagnosis.read-timeout-ms` | `45000` | 必须大于 Python 侧 `deepseek_timeout_seconds=40s` |
+| `ai-diagnosis.max-attempts` | `2` | 1 次调用 + 最多 1 次额外重试；无退避 |
+| `ai-diagnosis.qps` | `1` | Sentinel 资源 `incident-diagnosis`；规则与既有规则**合并**加载 |
+
+### 11.5 权限
+
+`/admin/incidents/{id}/diagnosis` 命中 `AdminAuthInterceptor` 的 `/admin/incidents` 前缀规则：GET 也必须携带 `X-Admin-Token`，无/错令牌返回 403，拦截器与 MvcConfig **零改动**。
+
+## 12. 数据库
 
 数据库包含五张表：
 
@@ -365,6 +446,6 @@ tb_incident
 
 初始化脚本位于 `src/main/resources/db/hmdp.sql`，不包含用户手机号或课程样例数据。既有环境升级故障事件表执行 `src/main/resources/db/incident-migration.sql`（幂等）。
 
-## 12. 关闭顺序
+## 13. 关闭顺序
 
 应用关闭时先停止 Pending 定时认领，再停止主消费者拉取，等待执行中的任务结束，最后更新消费者健康状态，减少消息处理中断窗口。

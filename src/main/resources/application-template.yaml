@@ -75,6 +75,21 @@ deepseek:
   api-key: ${DEEPSEEK_API_KEY:}
   url: https://api.deepseek.com/v1/chat/completions
 
+# V2-4：Java → Python 结构化诊断服务的调用可靠性（GET /admin/incidents/{id}/diagnosis）
+ai-diagnosis:
+  # false 时客户端直接本地降级（AI_SERVICE_DISABLED），不发起任何 HTTP 调用
+  enabled: true
+  # Python V2-3 诊断端点；Java 主系统端口为 8081，Python 默认 8000
+  url: ${AI_DIAGNOSIS_URL:http://127.0.0.1:8000/api/v1/diagnosis}
+  # 连接超时（可重试）
+  connect-timeout-ms: 2000
+  # 读取超时：必须大于 Python 侧 deepseek_timeout_seconds(40s)；读取超时**不重试**
+  read-timeout-ms: 45000
+  # 最多尝试次数 = 1 次调用 + 最多 1 次额外重试
+  max-attempts: 2
+  # 诊断接口 Sentinel 限流 QPS（复用既有 Sentinel，不引入新限流框架）
+  qps: 1
+
 admin:
   # 后台运维和秒杀券配置接口通过 X-Admin-Token 请求头校验。
   token: ${ADMIN_TOKEN:}
