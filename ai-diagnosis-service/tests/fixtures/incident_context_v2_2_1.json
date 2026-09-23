@@ -1,0 +1,146 @@
+{
+  "context_version": "v2-2.1",
+  "built_at": "2026-01-15T08:00:00.000Z",
+  "incident": {
+    "observed_at": "2026-01-15T08:00:00.000Z",
+    "incident_id": 9001,
+    "incident_type": "INVENTORY_MISMATCH",
+    "severity": "HIGH",
+    "source": "RECONCILE",
+    "status": "RESOLVED",
+    "business_key": "voucher:7001",
+    "related_voucher_id": 7001,
+    "occurrence_count": 2,
+    "first_detected_at": "2026-01-15T15:58:00",
+    "last_detected_at": "2026-01-15T16:04:30",
+    "resolved_at": "2026-01-15T16:05:00",
+    "title": "Redis ä¸ MySQL åºå­æç»­ä¸ä¸è´ï¼voucherId=7001ï¼",
+    "description": "è¿ç»­ä¸¤è½®å¯¹è´¦ç¡®è®¤åå·®ï¼redisStock=0, dbStock=1, deviation=1ï¼ç³»ç»ä¸ä¼èªå¨è¦çåºå­ï¼éäººå·¥ä»å¥",
+    "detected_snapshot": {
+      "voucher_id": 7001,
+      "redis_stock": 0,
+      "db_stock": 1,
+      "deviation": 1,
+      "detected_at": 1768464000000
+    },
+    "detected_snapshot_scope": "LATEST_DETECTION",
+    "recent_previous_incidents": [
+      {
+        "incident_id": 9000,
+        "status": "RESOLVED",
+        "severity": "HIGH",
+        "occurrence_count": 2,
+        "first_detected_at": "2026-01-15T15:50:00",
+        "last_detected_at": "2026-01-15T15:56:00",
+        "resolved_at": "2026-01-15T15:57:00"
+      }
+    ]
+  },
+  "metrics": {
+    "observed_at": "2026-01-15T08:00:00.000Z",
+    "counters": {
+      "total_requests": 2.0,
+      "reserve_success": 2.0,
+      "reserve_error": 0.0,
+      "duplicate_request": 0.0,
+      "commit_success": 2.0,
+      "commit_error": 0.0,
+      "stock_fail_redis": 0.0,
+      "stock_fail_db": 0.0,
+      "consume_error": 0.0,
+      "reconcile_mismatch": 4.0
+    },
+    "counter_presence": {
+      "total_requests": true,
+      "reserve_success": true,
+      "reserve_error": false,
+      "duplicate_request": false,
+      "commit_success": true,
+      "commit_error": false,
+      "stock_fail_redis": false,
+      "stock_fail_db": false,
+      "consume_error": false,
+      "reconcile_mismatch": true
+    }
+  },
+  "redis": {
+    "observed_at": "2026-01-15T08:00:00.000Z",
+    "voucher_stock": {
+      "key": "seckill:stock:7001",
+      "present": true,
+      "value": 1
+    },
+    "voucher_ordered_users": {
+      "key": "seckill:order:7001",
+      "present": true,
+      "cardinality": 2
+    },
+    "dirty_vouchers": {
+      "key": "seckill:voucher:dirty",
+      "present": false,
+      "member_count": null,
+      "contains_voucher": false
+    },
+    "reconcile_mismatch_marker": {
+      "key": "seckill:reconcile:mismatch:7001",
+      "present": false,
+      "value": null
+    }
+  },
+  "database": {
+    "observed_at": "2026-01-15T08:00:00.000Z",
+    "seckill_voucher": {
+      "voucher_id": 7001,
+      "stock": 1,
+      "begin_time": "2026-01-15T15:45:00",
+      "end_time": "2026-01-15T16:45:00",
+      "update_time": "2026-01-15T16:00:00"
+    },
+    "order_count_for_voucher": 2,
+    "recent_orders": [
+      {
+        "order_id": 810000000000000001,
+        "voucher_id": 7001,
+        "create_time": "2026-01-15T15:59:00"
+      },
+      {
+        "order_id": 810000000000000002,
+        "voucher_id": 7001,
+        "create_time": "2026-01-15T15:58:00"
+      }
+    ],
+    "recent_orders_limit": 20
+  },
+  "queue": null,
+  "consumer_health": null,
+  "runtime": null,
+  "context_quality": {
+    "complete": true,
+    "planned_sources": [
+      "incident",
+      "metrics",
+      "redis",
+      "database"
+    ],
+    "available_sources": [
+      "incident",
+      "metrics",
+      "redis",
+      "database"
+    ],
+    "unavailable_sources": [],
+    "not_implemented_sources": [
+      "logs"
+    ],
+    "errors": [],
+    "truncations": [],
+    "notes": [
+      "built_at ä¸åæ®µ observed_at ä¸º UTC Instantï¼incident æ®µæ¶é´å­æ®µåæ ·åèªæ°æ®åº LocalDateTimeï¼åå²å­å¨ä¸å«æ¶åºä¿¡æ¯ï¼æªéå ä»»ä½ offset",
+      "incident æ®µï¼å« detected_snapshotï¼æ¯æ£æµæ¶å»è¯æ®ï¼å¶ä½åæ®µæ¯æå»ºæ¶å»è¯»å°çå½åç¶æï¼ä¸¤èä¸å¯æ··ç¨",
+      "detected_snapshot ä»ä¿çæè¿ä¸æ¬¡æ£æµè¯æ®ï¼scope=LATEST_DETECTIONï¼ï¼æ´æ© occurrence çè¯æ®å·²è¢«èåè¦ç",
+      "metrics.counters ä¸º Redis è®¡æ°å¨åå§å¼ï¼counter_presence=false è¡¨ç¤ºè¯¥è®¡æ°å¨ key ä¸å­å¨ï¼æé¡¹ç®æ¢æçº¦å®ä»¥ 0 åä¸è®¡ç®ï¼å¯è½ä»£è¡¨æ äºä»¶æå·²è¿æ(TTL 7200s)",
+      "detected_snapshot ä¸ recent_orders åæç½ååæå½±ï¼ä¸å« user_id ç­ç¨æ·æ è¯",
+      "logs å¨å½åçæ¬ä¸å¯ç¨ï¼æ ç»æåæ¥å¿æºï¼ï¼åä¸º not_implemented_sourcesï¼ä¸å½±å complete"
+    ]
+  }
+}

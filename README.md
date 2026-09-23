@@ -44,6 +44,8 @@ Redis Stream 消费者组
 | 数据库一致性兜底 | `UPDATE ... WHERE stock > 0` 防超卖，用户与优惠券联合唯一索引防重复订单 |
 | 两阶段库存对账 | 脏券驱动，连续两次确认偏差后告警，降低异步落库窗口造成的瞬时误报 |
 | 统一故障事件 | 对账偏差、死信、消费者不健康统一抽象为 Incident，按 `incidentType + businessKey` 聚合与恢复，为后续 AI 诊断提供可追溯上下文 |
+| 故障上下文构建 | 按 IncidentType 收集真实证据（Incident 快照 / Redis / MySQL / 指标 / 队列 / 消费者健康 / 运行时），输出冻结的 `IncidentContext` 契约，只收证据不做诊断 |
+| 结构化 AI 诊断 | `ai-diagnosis-service/`（Python 3.12 + FastAPI）只消费 `IncidentContext`，模型只输出语义字段，证据必须可回溯；模型不可用时降级为 `UNAVAILABLE` |
 | 可观测与辅助诊断 | 业务计数、链路转化率、消费者心跳、Pending、死信和对账偏差统一采集，并输入 AI 生成结构化诊断建议 |
 
 ## 当前版本压测结果
@@ -143,6 +145,7 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 ## 目录与文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)：秒杀、恢复、补偿、对账和指标模型设计
+- [ai-diagnosis-service/README.md](ai-diagnosis-service/README.md)：V2-3 结构化 AI 诊断服务（接口、契约对齐、降级矩阵、运行方式）
 - [benchmark/README.md](benchmark/README.md)：JMeter 压测复现步骤
 - [benchmark/RESULTS.md](benchmark/RESULTS.md)：当前版本三轮原始压测结果
 - `src/main/resources/grafana-dashboard-seckill.json`：Grafana 仪表板

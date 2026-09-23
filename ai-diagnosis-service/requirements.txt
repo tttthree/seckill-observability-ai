@@ -1,0 +1,10 @@
+# V2-3 AI Diagnosis Service 依赖（Python 3.12 x64）
+# 注意：刻意不包含 redis / sqlalchemy / langchain / 向量库 —— 本服务只读 IncidentContext JSON。
+fastapi>=0.141,<1.0
+uvicorn[standard]>=0.53,<1.0
+pydantic>=2.13,<3.0
+pydantic-settings>=2.15,<3.0
+openai>=3.17,<4.0
+python-dotenv>=1.2,<2.0
+pytest>=9.1,<10.0
+httpx>=0.28,<1.0

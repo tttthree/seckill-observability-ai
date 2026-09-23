@@ -1,0 +1,11 @@
+# Python（V2-3 AI Diagnosis Service）
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# 首次运行 pytest 时由缓存插件产生的临时目录（沙箱下可能残留）
+pytest-cache-files-*/
+.env
+
+# 本地运行产物
+*.log

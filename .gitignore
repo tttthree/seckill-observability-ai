@@ -53,3 +53,10 @@ resume-v2.html
 tmp/
 output/
 tokens.txt
+
+# Python (V2-3 ai-diagnosis-service)
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+pytest-cache-files-*/
