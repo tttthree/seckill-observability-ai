@@ -64,6 +64,9 @@ class DeepSeekClient:
                 temperature=self._settings.deepseek_temperature,
                 max_tokens=self._settings.deepseek_max_tokens,
                 response_format={"type": "json_object"},
+                # 显式关闭 Thinking Mode：诊断只需稳定的结构化输出，不需要推理轨迹。
+                # 不传 reasoning_effort（避免与 thinking 配置语义冲突）。
+                extra_body={"thinking": {"type": "disabled"}},
             )
         except APITimeoutError as exc:
             raise ModelCallError(ErrorCode.MODEL_TIMEOUT, type(exc).__name__) from exc

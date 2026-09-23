@@ -1,5 +1,7 @@
 """诊断编排测试：LLM 只出语义字段；其余元数据由服务生成；降级矩阵逐项覆盖。"""
 
+import logging
+
 import pytest
 
 from config import Settings
@@ -245,6 +247,50 @@ def test_invalid_model_json_degrades_without_retry(context):
     assert result.diagnosis_status == "UNAVAILABLE"
     assert result.error_code == ErrorCode.MODEL_OUTPUT_INVALID.value
     assert client.calls == 1, "V2-3 不做重试"
+
+
+# ==================== V2-3.2：模型输出不合规时的安全日志 ====================
+
+
+def test_validation_error_log_contains_only_loc_and_type(context, caplog):
+    """Pydantic ValidationError 只记录 loc / type，不泄露模型原文与 input。"""
+    secret_marker = "SECRET-MODEL-OUTPUT-不得到日志"
+    # evidence 类型错误（应为 list），同时带上一个敏感标记值
+    raw = "{\"diagnosis_status\":\"DIAGNOSED\",\"root_cause\":\"" + secret_marker + "\",\"evidence\":\"not-a-list\"}"
+
+    service, client, _ = make_service(raw_text=raw)
+    with caplog.at_level(logging.WARNING, logger="services.diagnosis_service"):
+        result = service.diagnose(context)
+
+    assert result.diagnosis_status == "UNAVAILABLE"
+    assert result.error_code == ErrorCode.MODEL_OUTPUT_INVALID.value
+    assert client.calls == 1
+
+    logs = caplog.text
+    assert "diagnosis model output invalid" in logs
+    assert "'loc'" in logs and "'type'" in logs
+    # 禁止出现：模型完整原文、input、IncidentContext 内容
+    assert secret_marker not in logs
+    assert "not-a-list" not in logs
+    assert "'input'" not in logs
+    assert "detected_snapshot" not in logs
+    assert "voucher:7001" not in logs
+
+
+def test_validation_error_log_lists_each_error(context, caplog):
+    """多个字段不合规时，逐条记录 loc/type。"""
+    raw = (
+        '{"diagnosis_status":"NOT_A_STATUS","evidence":[{"note":"缺少 path"}],'
+        '"recommended_actions":[{"action":"a"}],"root_cause":123}'
+    )
+    service, _, _ = make_service(raw_text=raw)
+    with caplog.at_level(logging.WARNING, logger="services.diagnosis_service"):
+        result = service.diagnose(context)
+
+    assert result.error_code == ErrorCode.MODEL_OUTPUT_INVALID.value
+    logs = caplog.text
+    assert "error_count=" in logs
+    assert logs.count("'loc'") >= 2, logs
 
 
 def test_timeout_degrades(context):

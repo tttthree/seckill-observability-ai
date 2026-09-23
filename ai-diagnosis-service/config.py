@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # ---- DeepSeek（与 Java 侧同名环境变量，便于统一注入）----
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-flash"
     deepseek_timeout_seconds: float = 40.0
     deepseek_max_tokens: int = 1600
     deepseek_temperature: float = 0.0

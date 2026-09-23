@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from pydantic import ValidationError
+
 from config import Settings
 from models.context import IncidentContext
 from models.diagnosis import (
@@ -132,9 +134,22 @@ class DiagnosisService:
         # 4) 结构化解析（失败不重试）
         try:
             parsed = LLMDiagnosis.model_validate_json(_clean_model_output(raw))
+        except ValidationError as exc:
+            # 安全结构化诊断：只记录每个 error 的 loc / type；
+            # 绝不记录模型完整原文、input、IncidentContext 或任何凭据。
+            logger.warning(
+                "diagnosis model output invalid incident_id=%s error_count=%s errors=%s",
+                base["incident_id"],
+                len(exc.errors()),
+                [
+                    {"loc": [str(part) for part in error.get("loc", ())], "type": error.get("type")}
+                    for error in exc.errors()
+                ],
+            )
+            return self._unavailable(base, started, ErrorCode.MODEL_OUTPUT_INVALID)
         except Exception as exc:  # noqa: BLE001 - 模型输出不可控
             logger.warning(
-                "diagnosis model output invalid incident_id=%s error=%s",
+                "diagnosis model output unparsable incident_id=%s error=%s",
                 base["incident_id"],
                 type(exc).__name__,
             )

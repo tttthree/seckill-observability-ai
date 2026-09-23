@@ -58,7 +58,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
   "insufficient_reason": null,
   "error_code": null,
   "evidence_validation": {"submitted": 2, "accepted": 2, "dropped": 0},
-  "model": "deepseek-chat",
+  "model": "deepseek-flash",
   "prompt_version": "v2-3.1",
   "diagnosed_at": "2026-01-15T08:00:12.345Z",
   "elapsed_ms": 4210
