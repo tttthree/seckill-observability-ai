@@ -15,5 +15,7 @@ public class RedisConstants {
     public static final String STREAM_ORDERS_DEAD_KEY = "stream.orders.dead";
     public static final String STREAM_ORDERS_GROUP = "g1";
     public static final String SECKILL_VOUCHER_DIRTY_KEY = "seckill:voucher:dirty";
+    /** 两阶段对账：某张券"首次发现不一致"的标记 key 前缀，值为发现时间戳 */
+    public static final String SECKILL_RECONCILE_MISMATCH_KEY = "seckill:reconcile:mismatch:";
     public static final String STREAM_RETRY_KEY = "stream:retry:";
 }

@@ -10,6 +10,7 @@
 - Redis Stream 异步落库
 - Pending 认领、限次重试、死信和补偿
 - Redis 与 MySQL 库存对账
+- 统一故障事件（Incident）层
 - Micrometer、Prometheus、Grafana 监控
 - DeepSeek 结构化运维诊断
 
@@ -166,7 +167,53 @@ HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通�
 
 消费者健康指标额外包含存活心跳、成功消费心跳、Pending 数量和死信数量，用于区分“没有消息”和“消费者活着但无法提交”。
 
-## 7. AI 诊断
+## 7. 故障事件层（Incident）
+
+不同来源的异常在秒杀链路中被分别发现，原本只落到日志和 Redis 计数器，无法回答"这个故障什么时候开始、发生过几次、是否恢复"。V2-1 引入统一故障事件层：
+
+```text
+对账偏差 / 死信 / 消费者不健康
+        |
+        v
+IncidentReport（类型 + businessKey + 级别 + 证据）
+        |
+        v
+IncidentService：OPEN 聚合 / RESOLVE 关闭
+        |
+        v
+tb_incident → GET /admin/incidents
+```
+
+### 7.1 当前接入的故障来源
+
+| 类型 | 检测来源 | 恢复依据 | 级别 |
+|---|---|---|---|
+| `INVENTORY_MISMATCH` | `reconcile()` 两阶段确认后的持续偏差 | 同一轮对账发现 Redis 库存与 DB 库存重新一致 | HIGH |
+| `DEAD_LETTER` | `routeToDeadLetter()` 中补偿脚本返回成功 | 死信 Stream 中已无该券记录（重放后的真实状态） | HIGH |
+| `CONSUMER_UNHEALTHY` | `ConsumerHealthIndicator.health()` 的 DOWN / DEGRADED | 健康检查恢复 UP 且 `consumer_status=HEALTHY` | CRITICAL / MEDIUM |
+
+未接入：`commit_error`、`consume_error`、`reserve_error`、`stock_fail_db` 等只有累计计数、没有业务键与阈值语义的瞬时信号。按单次事件建 Incident 会产生噪声，本阶段不做。
+
+注意：消费者心跳超时（30s）、Pending 堆积、消费停滞等阈值判断全部保留在 `ConsumerHealthIndicator` 内；`IncidentDetector` 只读取其判定结果并驱动事件状态，不复制阈值。
+
+### 7.2 去重与聚合
+
+```text
+open_key = incident_type + ':' + business_key   （OPEN 时写入，RESOLVED 时置 NULL）
+UNIQUE KEY uk_incident_open (open_key)
+```
+
+上报流程：
+
+1. 原子聚合更新：`occurrence_count = occurrence_count + 1`、刷新 `last_detected_at` 与 `snapshot`；
+2. 影响行数为 0 才插入新事件；并发撞唯一索引时回退为步骤 1；
+3. 恢复时置 `RESOLVED` + `resolved_at`，并把 `open_key` 置 NULL。
+
+这样同一故障持续存在时只有一条 OPEN 记录（`occurrence_count` 递增），恢复后历史保留，复发再生成新事件。去重保证放在数据库唯一索引上，因此多消费者线程、多实例并发扫描也不会重复建单。
+
+故障事件的落库与查询失败不会影响秒杀主链路：`IncidentService` 内部吞掉异常并只记录日志，因为数据库本身可能就是故障源。主键使用数据库自增而非 Redis 生成，避免 Redis 不可用时无法记录故障。
+
+## 8. AI 诊断
 
 DeepSeek API Key 或地址未配置时，服务直接返回本地 `UNKNOWN` 降级结果，不向外部发送运行指标。
 
@@ -206,19 +253,20 @@ suggestion
 
 Prompt 强制要求每条结论引用输入指标，库存耗尽和重复下单被视为业务限制，而不是基础设施故障。
 
-## 8. 数据库
+## 9. 数据库
 
-数据库只包含四张表：
+数据库包含五张表：
 
 ```text
 tb_user
 tb_voucher
 tb_seckill_voucher
 tb_voucher_order
+tb_incident
 ```
 
-初始化脚本位于 `src/main/resources/db/hmdp.sql`，不包含用户手机号或课程样例数据。
+初始化脚本位于 `src/main/resources/db/hmdp.sql`，不包含用户手机号或课程样例数据。既有环境升级故障事件表执行 `src/main/resources/db/incident-migration.sql`（幂等）。
 
-## 9. 关闭顺序
+## 10. 关闭顺序
 
 应用关闭时先停止 Pending 定时认领，再停止主消费者拉取，等待执行中的任务结束，最后更新消费者健康状态，减少消息处理中断窗口。

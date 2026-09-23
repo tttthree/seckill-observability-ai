@@ -43,6 +43,7 @@ Redis Stream 消费者组
 | 原子死信补偿与重放 | Lua 同时完成 ACK、Redis 库存/资格回补和死信投递；重放时重新校验并预占资格 |
 | 数据库一致性兜底 | `UPDATE ... WHERE stock > 0` 防超卖，用户与优惠券联合唯一索引防重复订单 |
 | 两阶段库存对账 | 脏券驱动，连续两次确认偏差后告警，降低异步落库窗口造成的瞬时误报 |
+| 统一故障事件 | 对账偏差、死信、消费者不健康统一抽象为 Incident，按 `incidentType + businessKey` 聚合与恢复，为后续 AI 诊断提供可追溯上下文 |
 | 可观测与辅助诊断 | 业务计数、链路转化率、消费者心跳、Pending、死信和对账偏差统一采集，并输入 AI 生成结构化诊断建议 |
 
 ## 当前版本压测结果
@@ -55,6 +56,7 @@ Redis Stream 消费者组
 
 - Micrometer 将 Redis 业务计数器、消费者健康状态和链路比率暴露给 Prometheus。
 - Grafana 仪表板展示请求、预占、落库、失败、Pending、死信和对账偏差。
+- 故障事件层把对账偏差、死信、消费者不健康统一落库为 Incident，支持按状态/类型/券查询；持续异常只聚合更新（`occurrence_count`），恢复后置为 `RESOLVED`，复发再生成新事件。
 - 内置运维页 `dashboard.html` 汇总实时指标，并可调用 DeepSeek 输出主状态、关键症状、因果链和处置建议。
 - AI 仅消费结构化运行指标并提供辅助诊断；未配置 API Key 时返回本地 `UNKNOWN`，不发送指标。
 - Sentinel 仅保护指标与 AI 诊断接口，秒杀入口的库存竞争仍由 Redis Lua 处理。
@@ -125,9 +127,13 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 | GET | `/voucher-order/seckill/{id}/status` | 查询异步订单状态 |
 | GET | `/metrics/seckill` | 获取结构化秒杀指标 |
 | GET | `/metrics/ai/analyze` | 触发 AI 辅助诊断 |
+| GET | `/admin/incidents` | 查询故障事件列表（支持 status/type/voucherId/limit） |
+| GET | `/admin/incidents/{incidentId}` | 查询单个故障事件详情 |
 | GET | `/admin/seckill/{id}/stats` | 查看库存与队列状态 |
 | POST | `/admin/dead-letter/replay` | 原子重放死信 |
 | POST | `/admin/reconcile/trigger` | 手动触发库存对账 |
+
+故障事件只由系统内部检测逻辑产生，不提供创建接口；`/admin/**` 的 GET 查询接口沿用现有只读运维鉴权约定（无需用户登录态）。
 
 用户接口通过 `authorization: <token>` 传递身份；运维写接口通过 `X-Admin-Token: <ADMIN_TOKEN>` 鉴权。
 

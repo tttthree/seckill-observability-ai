@@ -20,6 +20,11 @@ spring:
         time-between-eviction-runs: 10s
   jackson:
     default-property-inclusion: non_null
+  task:
+    scheduling:
+      # 秒杀对账与故障状态检测器是两个独立定时任务，避免互相排队等待
+      pool:
+        size: 2
 mybatis-plus:
   type-aliases-package: com.hmdp.entity
 logging:
@@ -58,6 +63,13 @@ seckill:
   ai:
     baseline-enabled: true
     baseline-key: seckill:metrics:baseline
+  incident:
+    # 故障事件层：统一记录对账偏差、死信、消费者不健康
+    enabled: true
+    # 状态检测器轮询间隔（毫秒）：只读取既有检测结果驱动 OPEN/UPDATE/RESOLVE，不做阈值判断
+    detector-interval-ms: 30000
+    default-list-limit: 50
+    max-list-limit: 200
 
 deepseek:
   api-key: ${DEEPSEEK_API_KEY:}

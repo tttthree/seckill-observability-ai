@@ -35,6 +35,9 @@ public class SeckillProperties {
     /** AI 诊断配置 */
     private Ai ai = new Ai();
 
+    /** 故障事件（Incident）配置 */
+    private Incident incident = new Incident();
+
     @Data
     public static class Consumer {
         private int threads = 3;
@@ -85,5 +88,17 @@ public class SeckillProperties {
         private boolean baselineEnabled = true;
         /** Redis 中保存基线的 Hash key */
         private String baselineKey = "seckill:metrics:baseline";
+    }
+
+    @Data
+    public static class Incident {
+        /** 是否启用故障事件检测与落库 */
+        private boolean enabled = true;
+        /** 故障状态检测器轮询间隔（毫秒），只驱动 OPEN/UPDATE/RESOLVE，不做阈值判断 */
+        private long detectorIntervalMs = 30000;
+        /** 列表查询默认条数 */
+        private int defaultListLimit = 50;
+        /** 列表查询最大条数 */
+        private int maxListLimit = 200;
     }
 }

@@ -31,11 +31,18 @@ import javax.annotation.Resource;
 import com.hmdp.monitor.ConsumerHealthIndicator;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.UUID;
+import com.hmdp.constant.IncidentConstants;
+import com.hmdp.dto.IncidentReport;
+import com.hmdp.enums.IncidentSeverity;
+import com.hmdp.enums.IncidentSource;
+import com.hmdp.enums.IncidentType;
+import com.hmdp.service.IncidentService;
 import com.hmdp.exception.SeckillExceptions.*;
 
 import static com.hmdp.constant.MetricsConstants.*;
@@ -65,6 +72,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private ConsumerHealthIndicator healthIndicator;
 
+    /** 统一故障事件服务：检测到异常时上报，恢复时关闭（内部吞异常，不影响主链路） */
+    @Resource
+    private IncidentService incidentService;
+
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
     private static final DefaultRedisScript<Long> DEAD_LETTER_SCRIPT;
 
@@ -93,7 +104,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private static final String DEAD_LETTER_QUEUE = RedisConstants.STREAM_ORDERS_DEAD_KEY;
 
     private static final String RECONCILE_KEY = RedisConstants.SECKILL_VOUCHER_DIRTY_KEY;
-    private static final String RECONCILE_MISMATCH_PREFIX = "seckill:reconcile:mismatch:";
+    private static final String RECONCILE_MISMATCH_PREFIX = RedisConstants.SECKILL_RECONCILE_MISMATCH_KEY;
     private final String consumerInstanceId = buildConsumerInstanceId();
 
     @PostConstruct
@@ -517,6 +528,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 "retry_exhausted");
         if (Long.valueOf(1L).equals(routed)) {
             log.info("死信路由完成并回滚 Redis 预占 voucherId={}, orderId={}", vid, orderId);
+            // 重试超限是真实故障：上报为统一故障事件（按 voucherId 聚合）
+            reportDeadLetter(vid, userId, orderId, messageId);
         } else {
             log.info("消息已被其他消费者处理，跳过重复死信路由 messageId={}", messageId);
         }
@@ -532,6 +545,78 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             stringRedisTemplate.expire(retryKey, Duration.ofHours(1));
         }
         return retryCount != null && retryCount > seckillProperties.getRetry().getMax();
+    }
+
+    /**
+     * 将两阶段对账确认的库存偏差上报为统一故障事件。
+     * <p>
+     * 同一券持续偏差时由 IncidentService 聚合到已存在的 OPEN 事件（occurrence_count + 1），不重复建单。
+     */
+    private void reportInventoryMismatch(Long voucherId, int redisStock, int dbStock) {
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("voucher_id", voucherId);
+        evidence.put("redis_stock", redisStock);
+        evidence.put("db_stock", dbStock);
+        evidence.put("deviation", dbStock - redisStock);
+        evidence.put("detected_at", System.currentTimeMillis());
+
+        incidentService.report(new IncidentReport()
+                .setIncidentType(IncidentType.INVENTORY_MISMATCH)
+                .setSource(IncidentSource.RECONCILE)
+                .setSeverity(IncidentSeverity.HIGH)
+                .setBusinessKey(IncidentConstants.BUSINESS_KEY_VOUCHER_PREFIX + voucherId)
+                .setRelatedVoucherId(voucherId)
+                .setTitle("Redis 与 MySQL 库存持续不一致（voucherId=" + voucherId + "）")
+                .setDescription(String.format(
+                        "连续两轮对账确认偏差：redisStock=%d, dbStock=%d, deviation=%d；"
+                                + "系统不会自动覆盖库存，需人工介入",
+                        redisStock, dbStock, dbStock - redisStock))
+                .setEvidence(evidence));
+    }
+
+    /**
+     * 将重试超限进入死信队列的消息上报为统一故障事件（按 voucherId 聚合）。
+     */
+    private void reportDeadLetter(Object voucherId, Object userId, Object orderId, String messageId) {
+        Long relatedVoucherId = toLongQuietly(voucherId);
+        String businessKey = IncidentConstants.BUSINESS_KEY_VOUCHER_PREFIX
+                + (relatedVoucherId == null ? voucherId : relatedVoucherId);
+        int maxRetry = seckillProperties.getRetry().getMax();
+
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("message_id", messageId);
+        evidence.put("voucher_id", String.valueOf(voucherId));
+        evidence.put("user_id", String.valueOf(userId));
+        evidence.put("order_id", String.valueOf(orderId));
+        evidence.put("failure_reason", "retry_exhausted");
+        evidence.put("max_retry", maxRetry);
+        evidence.put("detected_at", System.currentTimeMillis());
+
+        incidentService.report(new IncidentReport()
+                .setIncidentType(IncidentType.DEAD_LETTER)
+                .setSource(IncidentSource.STREAM_CONSUMER)
+                .setSeverity(IncidentSeverity.HIGH)
+                .setBusinessKey(businessKey)
+                .setRelatedVoucherId(relatedVoucherId)
+                .setTitle("订单消息重试超限进入死信队列（voucherId=" + voucherId + "）")
+                .setDescription(String.format(
+                        "消息 %s 超过最大重试次数 %d，已回补 Redis 库存、释放下单资格并写入死信队列，等待人工重放",
+                        messageId, maxRetry))
+                .setEvidence(evidence));
+    }
+
+    /**
+     * 死信路由失败时不能因为故障上报而中断主链路，因此解析失败一律返回 null。
+     */
+    private static Long toLongQuietly(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Long.valueOf(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /**
@@ -559,7 +644,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 if (redisStock == dbStock) {
                     stringRedisTemplate.opsForSet()
                             .remove(RECONCILE_KEY, idStr);
-                    stringRedisTemplate.delete(RECONCILE_MISMATCH_PREFIX + voucherId);
+                    Boolean hadMismatch = stringRedisTemplate.delete(RECONCILE_MISMATCH_PREFIX + voucherId);
+                    // 此前观测到过偏差、本轮已一致：关闭对应的 OPEN 故障事件（无匹配事件时为幂等空操作）
+                    if (Boolean.TRUE.equals(hadMismatch)) {
+                        incidentService.resolve(IncidentType.INVENTORY_MISMATCH,
+                                IncidentConstants.BUSINESS_KEY_VOUCHER_PREFIX + voucherId);
+                    }
                     continue;
                 }
                 String mismatchKey = RECONCILE_MISMATCH_PREFIX + voucherId;
@@ -578,6 +668,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 stringRedisTemplate.opsForValue()
                         .set(mismatchKey, String.valueOf(System.currentTimeMillis()),
                                 Duration.ofMinutes(10));
+                // 两阶段确认后的持续偏差统一上报为故障事件（同一券的 OPEN 事件由 IncidentService 聚合）
+                reportInventoryMismatch(voucherId, redisStock, dbStock);
             }
         } catch (Exception e) {
             log.error("对账异常", e);
