@@ -237,12 +237,13 @@ UNIQUE KEY uk_incident_open (open_key)
 - **absent ≠ 0**：Redis 标量带 `present` 标志，`present=false` 时 `value=null`；`metrics.counter_presence` 让"计数器缺省按 0 参与计算"这一既有约定在契约层可见。
 - `metrics` 只投影 10 个真实运行计数器与 presence，不含 benchmark context / load_model / expected_model / comparison，也不重复 consumer health 字段。
 - `snapshot` 按 IncidentType 白名单投影；`detected_snapshot`、`recent_orders` 均不含 `user_id`。
-- 所有集合读取有界：`recent_orders` ≤20、`recent_previous_incidents` ≤5（排除当前 Incident）、死信从最新端读 ≤50 条，达到上限记 `truncations`。
+- 所有集合读取有界：`recent_orders` ≤20、`recent_previous_incidents` ≤5（排除当前 Incident）、死信从最新端读 ≤50 条。截断判定采用 N+1 探测：只有确实多出第 N+1 条才记 `truncations`，对外最多返回 N 条，避免"刚好等于上限"被误报为截断。
+- 死信过滤与 V2-1 的券级 Incident 聚合语义一致：`related_voucher_id` 存在时只按 `voucherId` 匹配（同一张券的多个不同 `orderId` 都属于同一故障事件）；`snapshot.order_id` 仅代表"最近一次检测证据"，只在没有券维度时作为 fallback 过滤条件。
 - 契约所有嵌套 DTO 都声明 `@JsonInclude(ALWAYS)`，保证 nullable 字段真实序列化为 `null`。
 
 ### 8.3 Partial failure 与质量描述
 
-每个数据源独立 try/catch：失败只把该段置 `null`、记入 `unavailable_sources` 与 `errors`（仅 `source` / `error_type` / 通用 message，原始异常只进服务日志），其余数据源正常返回。`context_quality.complete` 只相对于本 Incident 的 `planned_sources` 判断。`logs` 当前无结构化日志源，列为 `not_implemented_sources`，不影响 `complete`。
+每个数据源独立 try/catch：失败只把该段置 `null`、记入 `unavailable_sources` 与 `errors`（仅 `source` / `error_type` / 通用 message，原始异常只进服务日志），其余数据源正常返回。`available_sources` 只由**成功完成**的采集写入（构建失败的数据源不会出现在其中）。子读取失败（例如 `queue` 段内的消费者组读取）只记 `errors` 并保留该段其它已成功数据，不清空整段，但同样使 `complete=false`。`context_quality.complete` 只相对于本 Incident 的 `planned_sources` 判断。`logs` 当前无结构化日志源，列为 `not_implemented_sources`，不影响 `complete`。
 
 `GET /admin/incidents/{id}/context`：Incident 存在返回 200（可为 partial）；不存在返回 404 + `INCIDENT_NOT_FOUND`；主证据（Incident 行）读取异常按既有运维查询语义抛出。实时构建、不落库、全程只读。
 

@@ -55,7 +55,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -195,6 +197,167 @@ class IncidentContextBuilderImplTest {
         verify(voucherOrderMapper, never()).selectList(any());
     }
 
+    /** V2-2.2：incident 段构建失败时，不得出现在 available_sources */
+    @Test
+    void shouldNotMarkIncidentAvailableWhenItsCollectFails() {
+        stubInventoryIncident();
+        stubRedisReads(true);
+
+        IncidentContextBuilderImpl spy = spy(builder);
+        doThrow(new RuntimeException("incident evidence build failed"))
+                .when(spy).readIncidentEvidence(any(Incident.class), any(IncidentContextBuilderImpl.BuildState.class));
+
+        IncidentContext context = spy.build(INCIDENT_ID);
+
+        assertNull(context.getIncident());
+        assertFalse(context.getContextQuality().getAvailableSources().contains("incident"),
+                "collect 失败的数据源不得出现在 available_sources: " + context.getContextQuality().getAvailableSources());
+        assertTrue(context.getContextQuality().getUnavailableSources().contains("incident"));
+        assertFalse(context.getContextQuality().getComplete());
+    }
+
+    /** V2-2.2：consumer group 子读取失败必须记为 queue error 并使 complete=false，但不丢失其它 queue 数据 */
+    @Test
+    void shouldRecordQueueErrorWhenConsumerGroupReadFails() {
+        stubIncident(consumerUnhealthyIncident(), List.of());
+        stubRedisReads(true);
+        stubEmptyQueue();
+        when(streamOperations.groups("stream.orders"))
+                .thenThrow(new RuntimeException("xinfo groups failed: secret-detail"));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        // 其它 queue 数据保留
+        assertNotNull(context.getQueue());
+        assertEquals(Boolean.TRUE, context.getQueue().getMainStream().getExists());
+        assertEquals(Long.valueOf(4020L), context.getQueue().getMainStream().getLength());
+        // 该数据源本身未被整体判定为不可用
+        assertFalse(context.getContextQuality().getUnavailableSources().contains("queue"));
+        // 但必须记录 queue error 且 complete=false
+        assertFalse(context.getContextQuality().getComplete());
+        IncidentContext.SourceError error = context.getContextQuality().getErrors().stream()
+                .filter(e -> "queue".equals(e.getSource()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("缺少 queue source error: " + context.getContextQuality().getErrors()));
+        assertEquals("REDIS_ERROR", error.getErrorType());
+        assertEquals("redis read failed", error.getMessage());
+        assertFalse(error.getMessage().contains("secret-detail"));
+    }
+
+    /** V2-2.2：recent_orders 恰好 N 条不算截断，N+1 条才算且对外最多返回 N 条 */
+    @Test
+    void shouldNotReportRecentOrdersTruncationAtExactlyLimit() {
+        stubInventoryIncident();
+        stubRedisReads(true);
+        when(voucherOrderMapper.selectList(any()))
+                .thenReturn(orders(ContextConstants.RECENT_ORDERS_LIMIT));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertEquals(ContextConstants.RECENT_ORDERS_LIMIT, context.getDatabase().getRecentOrders().size());
+        assertTrue(context.getContextQuality().getTruncations().stream()
+                        .noneMatch(t -> "recent_orders".equals(t.getSource())),
+                "恰好 N 条不得判定为截断");
+        assertTrue(context.getContextQuality().getComplete());
+    }
+
+    @Test
+    void shouldReportRecentOrdersTruncationOnlyWhenExceedingLimit() {
+        stubInventoryIncident();
+        stubRedisReads(true);
+        when(voucherOrderMapper.selectList(any()))
+                .thenReturn(orders(ContextConstants.RECENT_ORDERS_LIMIT + 1));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertEquals(ContextConstants.RECENT_ORDERS_LIMIT, context.getDatabase().getRecentOrders().size(),
+                "对外最多返回 N 条");
+        IncidentContext.Truncation truncation = context.getContextQuality().getTruncations().stream()
+                .filter(t -> "recent_orders".equals(t.getSource()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("N+1 条必须记录截断"));
+        assertEquals(Integer.valueOf(ContextConstants.RECENT_ORDERS_LIMIT), truncation.getLimit());
+        assertEquals(Integer.valueOf(ContextConstants.RECENT_ORDERS_LIMIT), truncation.getReturned());
+    }
+
+    /** V2-2.2：死信扫描恰好 scanLimit 条不算截断，scanLimit+1 条才算且最多处理 scanLimit 条 */
+    @Test
+    void shouldNotReportDeadLetterTruncationAtExactlyScanLimit() {
+        stubIncident(deadLetterIncident(), List.of());
+        stubRedisReads(true);
+        stubEmptyQueue();
+        stubDeadLetterRecords(deadLetterRecords(ContextConstants.DEAD_LETTER_SCAN_LIMIT));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertTrue(context.getContextQuality().getTruncations().stream()
+                        .noneMatch(t -> "dead_letter_scan".equals(t.getSource())),
+                "恰好 scanLimit 条不得判定为截断");
+        assertTrue(context.getContextQuality().getComplete());
+    }
+
+    @Test
+    void shouldReportDeadLetterTruncationOnlyWhenExceedingScanLimit() {
+        stubIncident(deadLetterIncident(), List.of());
+        stubRedisReads(true);
+        stubEmptyQueue();
+        stubDeadLetterRecords(deadLetterRecords(ContextConstants.DEAD_LETTER_SCAN_LIMIT + 1));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        IncidentContext.Truncation truncation = context.getContextQuality().getTruncations().stream()
+                .filter(t -> "dead_letter_scan".equals(t.getSource()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("scanLimit+1 条必须记录截断"));
+        assertEquals(Integer.valueOf(ContextConstants.DEAD_LETTER_SCAN_LIMIT), truncation.getReturned());
+    }
+
+    /**
+     * V2-2.2：券级 Incident 只按 voucherId 过滤死信——
+     * 同券不同 orderId 的条目都应进入结果，snapshot.order_id 仅代表最近一次检测证据。
+     */
+    @Test
+    void shouldCollectAllDeadLetterEntriesOfSameVoucherRegardlessOfOrderId() {
+        // snapshot 里的 order_id=99，但同券还有 100/101 两条死信
+        stubIncident(deadLetterIncident(), List.of());
+        stubRedisReads(true);
+        stubEmptyQueue();
+        stubDeadLetterRecords(List.of(
+                deadLetterRecord("1-0", "7", "101"),
+                deadLetterRecord("2-0", "7", "100"),
+                deadLetterRecord("3-0", "7", "99"),
+                deadLetterRecord("4-0", "8", "77")));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        List<IncidentContext.DeadLetterEntry> entries = context.getQueue().getDeadLetterEntriesForVoucher();
+        assertEquals(3, entries.size(), "同券不同 orderId 的死信条目都应被收集");
+        List<Long> collectedOrderIds = new ArrayList<>();
+        for (IncidentContext.DeadLetterEntry entry : entries) {
+            collectedOrderIds.add(entry.getOrderId());
+        }
+        assertTrue(collectedOrderIds.containsAll(List.of(99L, 100L, 101L)), collectedOrderIds.toString());
+        assertTrue(entries.stream().allMatch(e -> Long.valueOf(7L).equals(e.getVoucherId())));
+    }
+
+    /** 无券维度时才退回 snapshot order_id 过滤 */
+    @Test
+    void shouldFallBackToSnapshotOrderIdWhenVoucherIsAbsent() {
+        Incident incident = deadLetterIncident().setRelatedVoucherId(null);
+        stubIncident(incident, List.of());
+        stubRedisReads(true);
+        stubEmptyQueue();
+        stubDeadLetterRecords(List.of(
+                deadLetterRecord("1-0", "7", "101"),
+                deadLetterRecord("2-0", "7", "99")));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        List<IncidentContext.DeadLetterEntry> entries = context.getQueue().getDeadLetterEntriesForVoucher();
+        assertEquals(1, entries.size());
+        assertEquals(Long.valueOf(99L), entries.get(0).getOrderId());
+    }
+
     /** absent ≠ 0：key 不存在时必须 present=false 且 value=null */
     @Test
     void shouldMarkAbsentRedisValuesAsNotPresentInsteadOfZero() {
@@ -315,22 +478,20 @@ class IncidentContextBuilderImplTest {
         assertFalse(error.getMessage().contains("super-secret"));
     }
 
-    /** 死信从最新端读取、按券过滤，并记录扫描上限截断 */
+    /** 死信从最新端读取、按券过滤，并记录扫描上限截断（scanLimit+1 条才判定） */
     @Test
     void shouldReadDeadLetterFromNewestEndAndRecordTruncation() {
         stubIncident(deadLetterIncident(), List.of());
         stubRedisReads(true);
         stubEmptyQueue();
-        when(stringRedisTemplate.hasKey("stream.orders.dead")).thenReturn(true);
-        when(streamOperations.size("stream.orders.dead")).thenReturn((long) ContextConstants.DEAD_LETTER_SCAN_LIMIT);
 
         List<MapRecord<String, Object, Object>> records = new ArrayList<>();
-        // 第一条属于本券，第二条属于其它券：应只保留本券
+        // 第一条属于本券，其余属于其它券：应只保留本券
         records.add(deadLetterRecord("1-0", "7", "99"));
-        for (int i = 1; i < ContextConstants.DEAD_LETTER_SCAN_LIMIT; i++) {
+        for (int i = 1; i <= ContextConstants.DEAD_LETTER_SCAN_LIMIT; i++) {
             records.add(deadLetterRecord(i + "-0", "8", "100"));
         }
-        when(streamOperations.reverseRange(anyString(), any(), any(Limit.class))).thenReturn(records);
+        stubDeadLetterRecords(records);
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
@@ -342,18 +503,13 @@ class IncidentContextBuilderImplTest {
                 .anyMatch(t -> "dead_letter_scan".equals(t.getSource()) && Boolean.TRUE.equals(t.getTruncated())));
     }
 
-    /** recent_orders 不输出 user_id，达到上限记录截断 */
+    /** recent_orders 不输出 user_id，超过上限记录截断（N+1 条才判定） */
     @Test
     void shouldExcludeUserIdFromRecentOrdersAndRecordTruncation() {
         stubInventoryIncident();
         stubRedisReads(true);
-
-        List<VoucherOrder> orders = new ArrayList<>();
-        for (int i = 0; i < ContextConstants.RECENT_ORDERS_LIMIT; i++) {
-            orders.add(new VoucherOrder().setId((long) i).setUserId(3L).setVoucherId(VOUCHER_ID)
-                    .setCreateTime(LocalDateTime.of(2026, 9, 23, 18, 0, i)));
-        }
-        when(voucherOrderMapper.selectList(any())).thenReturn(orders);
+        when(voucherOrderMapper.selectList(any()))
+                .thenReturn(orders(ContextConstants.RECENT_ORDERS_LIMIT + 1));
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
@@ -465,6 +621,32 @@ class IncidentContextBuilderImplTest {
         values.put("failureReason", "retry_exhausted");
         return StreamRecords.mapBacked(values).<String>withStreamKey("stream.orders.dead")
                 .withId(RecordId.of(entryId));
+    }
+
+    /** 生成 count 条订单（都不含 user_id 输出，但实体上带 userId 以验证白名单） */
+    private static List<VoucherOrder> orders(int count) {
+        List<VoucherOrder> orders = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            orders.add(new VoucherOrder().setId((long) i).setUserId(3L).setVoucherId(VOUCHER_ID)
+                    .setCreateTime(LocalDateTime.of(2026, 9, 23, 18, 0, i % 60)));
+        }
+        return orders;
+    }
+
+    /** 死信流存在 + 指定 reverseRange 结果 */
+    private void stubDeadLetterRecords(List<MapRecord<String, Object, Object>> records) {
+        when(stringRedisTemplate.hasKey("stream.orders.dead")).thenReturn(true);
+        when(streamOperations.size("stream.orders.dead")).thenReturn((long) records.size());
+        when(streamOperations.reverseRange(anyString(), any(), any(Limit.class))).thenReturn(records);
+    }
+
+    /** 生成 count 条死信记录（默认都属于其它券 voucherId=8） */
+    private static List<MapRecord<String, Object, Object>> deadLetterRecords(int count) {
+        List<MapRecord<String, Object, Object>> records = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            records.add(deadLetterRecord(i + "-0", "8", String.valueOf(1000 + i)));
+        }
+        return records;
     }
 
     private static Incident inventoryIncident() {

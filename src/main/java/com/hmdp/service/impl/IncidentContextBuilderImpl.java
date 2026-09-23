@@ -104,7 +104,6 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
         }
 
         BuildState state = new BuildState(incidentId, plannedSources(incident.getIncidentType()));
-        state.markAvailable(ContextConstants.SOURCE_INCIDENT);
 
         IncidentContext context = new IncidentContext()
                 .setContextVersion(ContextConstants.CONTEXT_VERSION)
@@ -112,6 +111,7 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
 
         Long voucherId = incident.getRelatedVoucherId();
 
+        // available 只由成功的 collect 设置：incident 段构建失败时不得出现在 available_sources
         context.setIncident(collect(state, ContextConstants.SOURCE_INCIDENT,
                 () -> readIncidentEvidence(incident, state), IncidentEvidence::setObservedAt));
 
@@ -179,7 +179,8 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
 
     // ==================== incident ====================
 
-    private IncidentEvidence readIncidentEvidence(Incident incident, BuildState state) {
+    /** 包内可见：仅供单测以 spy 方式验证"incident 段失败时不可出现在 available_sources" */
+    IncidentEvidence readIncidentEvidence(Incident incident, BuildState state) {
         IncidentEvidence evidence = new IncidentEvidence()
                 .setIncidentId(incident.getId())
                 .setIncidentType(name(incident.getIncidentType()))
@@ -385,17 +386,21 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
                 Wrappers.<VoucherOrder>lambdaQuery().eq(VoucherOrder::getVoucherId, voucherId));
         evidence.setOrderCountForVoucher(orderCount == null ? null : orderCount.longValue());
 
+        // 查询 N+1 条：只有确实多出第 N+1 条才判定截断，避免"刚好 N 条"被误报为截断
+        int ordersLimit = ContextConstants.RECENT_ORDERS_LIMIT;
         List<VoucherOrder> orders = voucherOrderMapper.selectList(Wrappers.<VoucherOrder>lambdaQuery()
                 .eq(VoucherOrder::getVoucherId, voucherId)
                 .orderByDesc(VoucherOrder::getCreateTime)
-                .last("LIMIT " + ContextConstants.RECENT_ORDERS_LIMIT));
+                .last("LIMIT " + (ordersLimit + 1)));
 
         List<RecentOrder> recentOrders = new ArrayList<>();
         if (orders != null) {
-            if (orders.size() >= ContextConstants.RECENT_ORDERS_LIMIT) {
-                state.markTruncation("recent_orders", ContextConstants.RECENT_ORDERS_LIMIT, orders.size());
+            int take = Math.min(orders.size(), ordersLimit);
+            if (orders.size() > ordersLimit) {
+                state.markTruncation("recent_orders", ordersLimit, take);
             }
-            for (VoucherOrder order : orders) {
+            for (int i = 0; i < take; i++) {
+                VoucherOrder order = orders.get(i);
                 // 刻意不输出 user_id
                 recentOrders.add(new RecentOrder()
                         .setOrderId(order.getId())
@@ -424,7 +429,7 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
                         .setLastGeneratedId(info.lastGeneratedId())
                         .setGroupCount(info.groupCount());
             }
-            evidence.setConsumerGroup(readConsumerGroup(streamKey));
+            evidence.setConsumerGroup(readConsumerGroup(streamKey, state));
         }
         evidence.setMainStream(summary);
 
@@ -444,8 +449,11 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
      * （spring-data-redis 2.7.18 的 {@link StreamInfo.XInfoGroup} 未暴露这两个字段，
      * 而 {@code RedisConnection.execute} 在 Lettuce 下使用 ByteArrayOutput，
      * 无法解码含整数的嵌套数组回复），因此不把永久为 null 的字段冻结进下游契约。
+     * <p>
+     * 读取异常不静默：向 queue 数据源记录 error（使 complete=false），
+     * 但不清空本段其它已成功读取的 queue 数据，也不暴露原始异常信息。
      */
-    private ConsumerGroupSummary readConsumerGroup(String streamKey) {
+    private ConsumerGroupSummary readConsumerGroup(String streamKey, BuildState state) {
         String groupName = RedisConstants.STREAM_ORDERS_GROUP;
         ConsumerGroupSummary summary = new ConsumerGroupSummary().setName(groupName);
         try {
@@ -463,7 +471,10 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
                 }
             }
         } catch (Exception e) {
+            // 原始异常只进服务日志
             log.warn("消费者组信息读取失败 key={}", streamKey, e);
+            state.markError(ContextConstants.SOURCE_QUEUE,
+                    classify(ContextConstants.SOURCE_QUEUE, e));
         }
         return summary;
     }
@@ -481,7 +492,11 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
     }
 
     /**
-     * 从最新端读取最近 N 条死信，再按 voucher/order 过滤；达到扫描上限记录 truncation。
+     * 从最新端读取最近 scanLimit 条死信，再按券过滤；仅当确实多出第 scanLimit+1 条才记录 truncation。
+     * <p>
+     * 过滤语义与 V2-1 的券级 Incident 聚合保持一致：只要 Incident 有 relatedVoucherId，就只按 voucherId
+     * 匹配最近死信（同券的多个不同 orderId 都属于同一故障事件）；snapshot 中的 order_id 仅代表
+     * "最近一次检测证据"，只在 relatedVoucherId 缺失时作为 fallback 使用。
      */
     private List<DeadLetterEntry> readDeadLetterEntries(Incident incident, BuildState state,
                                                         DeadLetterStream deadLetterStream) {
@@ -490,27 +505,33 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
         }
 
         Long targetVoucherId = incident.getRelatedVoucherId();
-        Long targetOrderId = snapshotOrderId(incident);
+        // 仅当没有券维度时才退回 orderId，避免"最新一次 order_id"过滤掉同券的其它死信条目
+        Long fallbackOrderId = targetVoucherId == null ? snapshotOrderId(incident) : null;
         String deadKey = RedisConstants.STREAM_ORDERS_DEAD_KEY;
+        int scanLimit = ContextConstants.DEAD_LETTER_SCAN_LIMIT;
 
+        // 读取 scanLimit+1 条：只有确实多出第 N+1 条才判定截断
         List<MapRecord<String, Object, Object>> records = stringRedisTemplate.opsForStream()
-                .reverseRange(deadKey, Range.unbounded(), Limit.limit().count(ContextConstants.DEAD_LETTER_SCAN_LIMIT));
+                .reverseRange(deadKey, Range.unbounded(), Limit.limit().count(scanLimit + 1));
 
         List<DeadLetterEntry> entries = new ArrayList<>();
         if (records == null) {
             return entries;
         }
-        if (records.size() >= ContextConstants.DEAD_LETTER_SCAN_LIMIT) {
-            state.markTruncation("dead_letter_scan", ContextConstants.DEAD_LETTER_SCAN_LIMIT, records.size());
+        if (records.size() > scanLimit) {
+            state.markTruncation("dead_letter_scan", scanLimit, scanLimit);
         }
-        for (MapRecord<String, Object, Object> record : records) {
+        int scanSize = Math.min(records.size(), scanLimit);
+        for (int i = 0; i < scanSize; i++) {
+            MapRecord<String, Object, Object> record = records.get(i);
             Map<Object, Object> value = record.getValue();
             Long voucherId = asLong(value.get("voucherId"));
             Long orderId = asLong(value.get("id"));
-            if (targetVoucherId != null && !targetVoucherId.equals(voucherId)) {
-                continue;
-            }
-            if (targetOrderId != null && !targetOrderId.equals(orderId)) {
+            if (targetVoucherId != null) {
+                if (!targetVoucherId.equals(voucherId)) {
+                    continue;
+                }
+            } else if (fallbackOrderId != null && !fallbackOrderId.equals(orderId)) {
                 continue;
             }
             entries.add(new DeadLetterEntry()
@@ -611,8 +632,8 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
         return false;
     }
 
-    /** 单次构建的可变状态：planned 决定采集范围，未计划的数据源不会进入任何列表 */
-    private static final class BuildState {
+    /** 单次构建的可变状态：planned 决定采集范围，未计划的数据源不会进入任何列表。包内可见以支持单测。 */
+    static final class BuildState {
 
         private final long incidentId;
         private final List<String> planned;
