@@ -39,7 +39,10 @@ public interface IncidentService extends IService<Incident> {
     boolean resolve(IncidentType incidentType, String businessKey);
 
     /**
-     * 列表查询，按 last_detected_at 倒序返回最新若干条。内部吞掉所有异常。
+     * 列表查询，按 last_detected_at 倒序返回最新若干条。
+     * <p>
+     * 运维查询必须显式失败：数据库异常直接抛出，由 WebExceptionAdvice 统一返回失败响应，
+     * 不得伪装成空列表。
      *
      * @param status    可选，状态过滤
      * @param type      可选，类型过滤
@@ -49,12 +52,15 @@ public interface IncidentService extends IService<Incident> {
     List<Incident> listIncidents(IncidentStatus status, IncidentType type, Long voucherId, Integer limit);
 
     /**
-     * 按 id 查询详情。内部吞掉所有异常。
+     * 按 id 查询详情。运维查询必须显式失败：数据库异常直接抛出，不得伪装成 null。
      */
     Incident getIncident(Long incidentId);
 
     /**
-     * 查询某类型下全部 OPEN 事件，供恢复判定使用。
+     * 查询某类型下全部 OPEN 事件，供检测器做恢复判定使用。
+     * <p>
+     * 与运维查询相反，这里属于检测链路：失败时返回空列表并记录日志（fail-open），
+     * 避免一次数据库抖动中断其它故障的状态同步。
      */
     List<Incident> listOpenIncidents(IncidentType incidentType);
 }

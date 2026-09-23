@@ -133,9 +133,9 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 | POST | `/admin/dead-letter/replay` | 原子重放死信 |
 | POST | `/admin/reconcile/trigger` | 手动触发库存对账 |
 
-故障事件只由系统内部检测逻辑产生，不提供创建接口；`/admin/**` 的 GET 查询接口沿用现有只读运维鉴权约定（无需用户登录态）。
+故障事件只由系统内部检测逻辑产生，不提供创建接口。`/admin/incidents/**` 的只读查询同样要求 `X-Admin-Token`——故障事件包含业务键、关联券 id 与库存快照，属于敏感运维数据；其余 `/admin/**` 只读接口保持原有约定（GET 免令牌）。
 
-用户接口通过 `authorization: <token>` 传递身份；运维写接口通过 `X-Admin-Token: <ADMIN_TOKEN>` 鉴权。
+用户接口通过 `authorization: <token>` 传递身份；运维写接口与故障事件查询通过 `X-Admin-Token: <ADMIN_TOKEN>` 鉴权。
 
 ## 目录与文档
 

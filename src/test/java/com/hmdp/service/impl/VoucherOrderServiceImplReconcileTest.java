@@ -73,17 +73,17 @@ class VoucherOrderServiceImplReconcileTest {
         when(stringRedisTemplate.opsForSet()).thenReturn(setOperations);
     }
 
-    /** Case 1：库存一致时既不上报也不恢复，且照旧清理脏券 */
+    /** Case 1 语义：库存一致时不上报故障，但仍幂等尝试关闭既有事件并清理 Reconcile 状态 */
     @Test
     void shouldNotReportWhenStocksAreConsistent() {
         stubStocks("5", 5);
-        when(stringRedisTemplate.delete(MISMATCH_KEY)).thenReturn(false);
 
         service.reconcile();
 
         verify(incidentService, never()).report(any());
-        verify(incidentService, never()).resolve(any(), anyString());
+        verify(incidentService).resolve(IncidentType.INVENTORY_MISMATCH, BUSINESS_KEY);
         verify(setOperations).remove(SECKILL_VOUCHER_DIRTY_KEY, VOUCHER_ID);
+        verify(stringRedisTemplate).delete(MISMATCH_KEY);
     }
 
     /** Case 2 前段：首次发现偏差只打标记告警，不建故障事件（两阶段确认） */
@@ -140,11 +140,10 @@ class VoucherOrderServiceImplReconcileTest {
         verify(incidentService, never()).resolve(any(), anyString());
     }
 
-    /** Case 4：库存恢复一致且此前有偏差标记 → 关闭 OPEN 故障事件 */
+    /** Case 4：本轮确认库存一致 → 关闭 OPEN 故障事件（不要求此前存在偏差标记） */
     @Test
     void shouldResolveIncidentWhenStocksRecover() {
         stubStocks("7", 7);
-        when(stringRedisTemplate.delete(MISMATCH_KEY)).thenReturn(true);
 
         service.reconcile();
 
@@ -152,16 +151,21 @@ class VoucherOrderServiceImplReconcileTest {
         verify(incidentService, never()).report(any());
     }
 
-    /** Case 4 边界：一致但此前从未出现偏差 → 不做恢复调用 */
+    /**
+     * Case 4 关键边界：mismatch 标记可能因 10 分钟 TTL 过期或 Redis 重启而丢失，
+     * 此时只要本轮确认一致，仍必须幂等尝试关闭对应 OPEN 事件。
+     */
     @Test
-    void shouldNotResolveWhenNoMismatchWasEverRecorded() {
+    void shouldAttemptResolveEvenWhenMismatchMarkerIsMissing() {
         stubStocks("7", 7);
-        when(stringRedisTemplate.delete(MISMATCH_KEY)).thenReturn(false);
+        when(stringRedisTemplate.delete(MISMATCH_KEY)).thenReturn(false); // 标记已不存在
 
         service.reconcile();
 
-        verify(incidentService, never()).resolve(any(), anyString());
+        verify(incidentService).resolve(IncidentType.INVENTORY_MISMATCH, BUSINESS_KEY);
         verify(incidentService, never()).report(any());
+        verify(setOperations).remove(SECKILL_VOUCHER_DIRTY_KEY, VOUCHER_ID);
+        verify(stringRedisTemplate).delete(MISMATCH_KEY);
     }
 
     /** 没有脏券时不产生任何故障事件 */

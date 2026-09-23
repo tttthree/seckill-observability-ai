@@ -12,11 +12,18 @@ import java.security.MessageDigest;
 
 /**
  * 用独立的管理员 token 保护运维接口和业务写操作。
+ * <p>
+ * 约定：写操作（非 GET/HEAD）必须携带 token；只读 GET/HEAD 默认放行，
+ * 仅 {@link #TOKEN_REQUIRED_READ_PREFIX} 下的故障事件查询例外——故障事件包含业务键、
+ * 券 id 与库存快照，属于敏感运维数据，读取同样需要管理员令牌。
  */
 @Component
 public class AdminAuthInterceptor implements HandlerInterceptor {
 
     private static final String ADMIN_TOKEN_HEADER = "X-Admin-Token";
+
+    /** 该前缀下的只读请求也要求管理员令牌（其余 /admin/** GET 行为不变） */
+    private static final String TOKEN_REQUIRED_READ_PREFIX = "/admin/incidents";
 
     private final String adminToken;
 
@@ -30,7 +37,7 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
         if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
             return true;
         }
-        if ("GET".equalsIgnoreCase(request.getMethod()) || "HEAD".equalsIgnoreCase(request.getMethod())) {
+        if (isReadOnly(request.getMethod()) && !requiresAdminTokenForRead(request)) {
             return true;
         }
 
@@ -43,6 +50,24 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
             return false;
         }
         return true;
+    }
+
+    private static boolean isReadOnly(String method) {
+        return "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
+    }
+
+    /**
+     * 判断只读请求是否仍需要管理员令牌。
+     * 只匹配 /admin/incidents 与其子路径，避免影响其它 /admin/** 只读接口。
+     */
+    private static boolean requiresAdminTokenForRead(HttpServletRequest request) {
+        String path = request.getRequestURI();
+        String contextPath = request.getContextPath();
+        if (contextPath != null && !contextPath.isEmpty() && path.startsWith(contextPath)) {
+            path = path.substring(contextPath.length());
+        }
+        return path.equals(TOKEN_REQUIRED_READ_PREFIX)
+                || path.startsWith(TOKEN_REQUIRED_READ_PREFIX + "/");
     }
 
     private boolean constantTimeEquals(String expected, String actual) {

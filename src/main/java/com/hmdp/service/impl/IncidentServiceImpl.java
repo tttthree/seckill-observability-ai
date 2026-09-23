@@ -43,6 +43,13 @@ import java.util.Map;
 @Service
 public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> implements IncidentService {
 
+    /**
+     * severity 列在 SQL 中的级别序号表达式，由枚举自身生成：
+     * CASE severity WHEN 'LOW' THEN 1 ... ELSE 0 END。
+     * 序号取自 {@link IncidentSeverity#getRank()}，因此新增级别时无需修改此常量。
+     */
+    private static final String SEVERITY_RANK_SQL = buildSeverityRankSql();
+
     @Resource
     private ObjectMapper objectMapper;
 
@@ -53,6 +60,7 @@ public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> i
     public Incident report(IncidentReport report) {
         if (report == null
                 || report.getIncidentType() == null
+                || report.getSource() == null
                 || !StringUtils.hasText(report.getBusinessKey())) {
             log.warn("故障事件上报参数不完整，已忽略");
             return null;
@@ -137,17 +145,13 @@ public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> i
     @Override
     public List<Incident> listIncidents(IncidentStatus status, IncidentType type,
                                         Long voucherId, Integer limit) {
-        try {
-            return list(Wrappers.<Incident>lambdaQuery()
-                    .eq(status != null, Incident::getStatus, status)
-                    .eq(type != null, Incident::getIncidentType, type)
-                    .eq(voucherId != null, Incident::getRelatedVoucherId, voucherId)
-                    .orderByDesc(Incident::getLastDetectedAt)
-                    .last("LIMIT " + normalizeLimit(limit)));
-        } catch (Exception e) {
-            log.warn("故障事件列表查询失败", e);
-            return Collections.emptyList();
-        }
+        // 运维查询必须显式失败：不吞异常，交由 WebExceptionAdvice 统一返回失败响应
+        return list(Wrappers.<Incident>lambdaQuery()
+                .eq(status != null, Incident::getStatus, status)
+                .eq(type != null, Incident::getIncidentType, type)
+                .eq(voucherId != null, Incident::getRelatedVoucherId, voucherId)
+                .orderByDesc(Incident::getLastDetectedAt)
+                .last("LIMIT " + normalizeLimit(limit)));
     }
 
     @Override
@@ -155,12 +159,8 @@ public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> i
         if (incidentId == null) {
             return null;
         }
-        try {
-            return getById(incidentId);
-        } catch (Exception e) {
-            log.warn("故障事件详情查询失败 id={}", incidentId, e);
-            return null;
-        }
+        // 运维查询必须显式失败：不吞异常，交由 WebExceptionAdvice 统一返回失败响应
+        return getById(incidentId);
     }
 
     @Override
@@ -193,21 +193,25 @@ public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> i
     }
 
     /**
-     * 故障级别只升不降：同一事件被更高等级的证据再次命中时升级。
+     * 故障级别原子升级：把"只升不降"交给数据库条件约束，避免 SELECT→比较→UPDATE 的并发竞态。
+     * <p>
+     * 单条条件 UPDATE：WHERE 中要求库中当前级别 rank 严格小于本次级别 rank，才会写入新级别。
+     * 任意并发顺序下该语句都不会写入更低的级别，因此 severity 单调不降；
+     * 级别相同时影响行数为 0，同样不会重复写。
      */
     private void escalateSeverityIfNeeded(String openKey, IncidentSeverity severity) {
         if (severity == null) {
             return;
         }
-        Incident open = baseMapper.selectOne(Wrappers.<Incident>lambdaQuery()
-                .eq(Incident::getOpenKey, openKey));
-        if (open == null || open.getSeverity() == null || severity.getRank() <= open.getSeverity().getRank()) {
-            return;
-        }
-        baseMapper.update(null, Wrappers.<Incident>lambdaUpdate()
-                .eq(Incident::getId, open.getId())
+        int rows = baseMapper.update(null, Wrappers.<Incident>lambdaUpdate()
+                .eq(Incident::getOpenKey, openKey)
+                .eq(Incident::getStatus, IncidentStatus.OPEN)
+                .apply(SEVERITY_RANK_SQL + " < {0}", severity.getRank())
                 .set(Incident::getSeverity, severity));
-        log.info("故障事件级别升级 id={}, {} -> {}", open.getId(), open.getSeverity(), severity);
+
+        if (rows > 0) {
+            log.info("故障事件级别升级 openKey={}, severity={}", openKey, severity);
+        }
     }
 
     private Incident buildIncident(String openKey, IncidentReport report, LocalDateTime now) {
@@ -237,6 +241,16 @@ public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> i
             return null;
         }
         return openKey;
+    }
+
+    /** 由枚举生成 severity 级别序号表达式，避免级别定义与 SQL 字面量脱节 */
+    private static String buildSeverityRankSql() {
+        StringBuilder sql = new StringBuilder("CASE severity");
+        for (IncidentSeverity severity : IncidentSeverity.values()) {
+            sql.append(" WHEN '").append(severity.getCode())
+                    .append("' THEN ").append(severity.getRank());
+        }
+        return sql.append(" ELSE 0 END").toString();
     }
 
     private int normalizeLimit(Integer limit) {

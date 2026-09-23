@@ -644,12 +644,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 if (redisStock == dbStock) {
                     stringRedisTemplate.opsForSet()
                             .remove(RECONCILE_KEY, idStr);
-                    Boolean hadMismatch = stringRedisTemplate.delete(RECONCILE_MISMATCH_PREFIX + voucherId);
-                    // 此前观测到过偏差、本轮已一致：关闭对应的 OPEN 故障事件（无匹配事件时为幂等空操作）
-                    if (Boolean.TRUE.equals(hadMismatch)) {
-                        incidentService.resolve(IncidentType.INVENTORY_MISMATCH,
-                                IncidentConstants.BUSINESS_KEY_VOUCHER_PREFIX + voucherId);
-                    }
+                    stringRedisTemplate.delete(RECONCILE_MISMATCH_PREFIX + voucherId);
+                    // 本轮已确认一致即视为恢复：不再以 mismatch 标记是否存在为前提。
+                    // 该标记可能因 10 分钟 TTL 过期或 Redis 重启而丢失，但它不改变"当前库存一致"的事实；
+                    // resolve 对没有 OPEN 事件的券是幂等空操作，因此每轮都调用是安全的。
+                    incidentService.resolve(IncidentType.INVENTORY_MISMATCH,
+                            IncidentConstants.BUSINESS_KEY_VOUCHER_PREFIX + voucherId);
                     continue;
                 }
                 String mismatchKey = RECONCILE_MISMATCH_PREFIX + voucherId;

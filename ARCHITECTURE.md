@@ -207,11 +207,14 @@ UNIQUE KEY uk_incident_open (open_key)
 
 1. 原子聚合更新：`occurrence_count = occurrence_count + 1`、刷新 `last_detected_at` 与 `snapshot`；
 2. 影响行数为 0 才插入新事件；并发撞唯一索引时回退为步骤 1；
-3. 恢复时置 `RESOLVED` + `resolved_at`，并把 `open_key` 置 NULL。
+3. 级别升级由单条条件 UPDATE 完成：`WHERE ... AND CASE severity WHEN 'LOW' THEN 1 ... END < 本次级别序号`，不读取当前级别再比较，任意并发顺序都不会降级；
+4. 恢复时置 `RESOLVED` + `resolved_at`，并把 `open_key` 置 NULL。
 
 这样同一故障持续存在时只有一条 OPEN 记录（`occurrence_count` 递增），恢复后历史保留，复发再生成新事件。去重保证放在数据库唯一索引上，因此多消费者线程、多实例并发扫描也不会重复建单。
 
-故障事件的落库与查询失败不会影响秒杀主链路：`IncidentService` 内部吞掉异常并只记录日志，因为数据库本身可能就是故障源。主键使用数据库自增而非 Redis 生成，避免 Redis 不可用时无法记录故障。
+写入与检测链路保持 fail-open：`report()` / `resolve()` / `listOpenIncidents()` 吞掉异常并只记录日志，因为数据库本身可能就是故障源，故障记录失败不得影响秒杀主链路。但**运维查询必须显式失败**：`listIncidents()` / `getIncident()` 不吞异常，由 `WebExceptionAdvice` 统一返回 `success=false`，避免把数据库故障伪装成"没有故障"。主键使用数据库自增而非 Redis 生成，避免 Redis 不可用时无法记录故障。
+
+故障事件包含业务键、关联券 id 与库存快照，`GET /admin/incidents/**` 因此与写操作一样要求 `X-Admin-Token`；其余 `/admin/**` 只读接口保持原有免令牌行为。
 
 ## 8. AI 诊断
 
