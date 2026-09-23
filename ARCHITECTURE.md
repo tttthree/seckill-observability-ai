@@ -216,7 +216,41 @@ UNIQUE KEY uk_incident_open (open_key)
 
 故障事件包含业务键、关联券 id 与库存快照，`GET /admin/incidents/**` 因此与写操作一样要求 `X-Admin-Token`；其余 `/admin/**` 只读接口保持原有免令牌行为。
 
-## 8. AI 诊断
+## 8. Incident Context Builder（V2-2）
+
+围绕一个已存在的 Incident 收集真实运行证据，输出统一的 `IncidentContext`，作为后续 AI Diagnosis Service 的 Java→Python 输入契约。**本层只做 Context Building，不做诊断**：不含根因推断、不含置信度评分、不调 LLM。
+
+### 8.1 采集范围按 IncidentType 严格计划
+
+| IncidentType | planned_sources |
+|---|---|
+| `INVENTORY_MISMATCH` | incident + metrics + redis(券) + database(券) |
+| `DEAD_LETTER` | incident + metrics + redis(券) + database(券) + queue + consumer_health |
+| `CONSUMER_UNHEALTHY` | incident + metrics + queue + consumer_health + runtime |
+
+未计划的数据源既不采集、也不进入 `available/unavailable` 列表，其 JSON 段为 `null`。
+
+### 8.2 契约与语义约束
+
+- `built_at` 与各段 `observed_at` 为 UTC `Instant`；Incident 段时间字段原样输出数据库中的无时区 `LocalDateTime`；`snapshot.detected_at` 保留 epoch millis。
+- 检测证据（`incident.*`，含 `detected_snapshot`，scope 固定 `LATEST_DETECTION`）与构建时刻状态（`redis/database/queue/consumer_health/metrics/runtime`）严格分离。
+- **absent ≠ 0**：Redis 标量带 `present` 标志，`present=false` 时 `value=null`；`metrics.counter_presence` 让"计数器缺省按 0 参与计算"这一既有约定在契约层可见。
+- `metrics` 只投影 10 个真实运行计数器与 presence，不含 benchmark context / load_model / expected_model / comparison，也不重复 consumer health 字段。
+- `snapshot` 按 IncidentType 白名单投影；`detected_snapshot`、`recent_orders` 均不含 `user_id`。
+- 所有集合读取有界：`recent_orders` ≤20、`recent_previous_incidents` ≤5（排除当前 Incident）、死信从最新端读 ≤50 条，达到上限记 `truncations`。
+- 契约所有嵌套 DTO 都声明 `@JsonInclude(ALWAYS)`，保证 nullable 字段真实序列化为 `null`。
+
+### 8.3 Partial failure 与质量描述
+
+每个数据源独立 try/catch：失败只把该段置 `null`、记入 `unavailable_sources` 与 `errors`（仅 `source` / `error_type` / 通用 message，原始异常只进服务日志），其余数据源正常返回。`context_quality.complete` 只相对于本 Incident 的 `planned_sources` 判断。`logs` 当前无结构化日志源，列为 `not_implemented_sources`，不影响 `complete`。
+
+`GET /admin/incidents/{id}/context`：Incident 存在返回 200（可为 partial）；不存在返回 404 + `INCIDENT_NOT_FOUND`；主证据（Incident 行）读取异常按既有运维查询语义抛出。实时构建、不落库、全程只读。
+
+### 8.4 已知不可得字段
+
+`queue.consumer_group.lag / entries_read` 恒为 `null`：spring-data-redis 2.7.18 的 `XInfoGroup` 未暴露这两个字段，而 `RedisConnection.execute` 在 Lettuce 下使用 `ByteArrayOutput`，无法解码含整数的嵌套数组回复（实测 `UnsupportedOperationException`）。该限制由 `context_quality.notes` 明示。
+
+## 9. AI 诊断
 
 DeepSeek API Key 或地址未配置时，服务直接返回本地 `UNKNOWN` 降级结果，不向外部发送运行指标。
 
@@ -256,7 +290,7 @@ suggestion
 
 Prompt 强制要求每条结论引用输入指标，库存耗尽和重复下单被视为业务限制，而不是基础设施故障。
 
-## 9. 数据库
+## 10. 数据库
 
 数据库包含五张表：
 
@@ -270,6 +304,6 @@ tb_incident
 
 初始化脚本位于 `src/main/resources/db/hmdp.sql`，不包含用户手机号或课程样例数据。既有环境升级故障事件表执行 `src/main/resources/db/incident-migration.sql`（幂等）。
 
-## 10. 关闭顺序
+## 11. 关闭顺序
 
 应用关闭时先停止 Pending 定时认领，再停止主消费者拉取，等待执行中的任务结束，最后更新消费者健康状态，减少消息处理中断窗口。

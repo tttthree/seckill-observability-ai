@@ -129,11 +129,14 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 | GET | `/metrics/ai/analyze` | 触发 AI 辅助诊断 |
 | GET | `/admin/incidents` | 查询故障事件列表（支持 status/type/voucherId/limit） |
 | GET | `/admin/incidents/{incidentId}` | 查询单个故障事件详情 |
+| GET | `/admin/incidents/{incidentId}/context` | 实时构建该故障的 IncidentContext（V2-2） |
 | GET | `/admin/seckill/{id}/stats` | 查看库存与队列状态 |
 | POST | `/admin/dead-letter/replay` | 原子重放死信 |
 | POST | `/admin/reconcile/trigger` | 手动触发库存对账 |
 
 故障事件只由系统内部检测逻辑产生，不提供创建接口。`/admin/incidents/**` 的只读查询同样要求 `X-Admin-Token`——故障事件包含业务键、关联券 id 与库存快照，属于敏感运维数据；其余 `/admin/**` 只读接口保持原有约定（GET 免令牌）。
+
+`/admin/incidents/{id}/context` 实时构建、不落库，只收集真实读到的证据（Redis / MySQL / Stream / 消费者健康 / JVM），**不做任何根因推断**；按 IncidentType 严格计划采集范围，单个数据源失败只降级该段并记为 `unavailable`，HTTP 仍返回 200 并在 `context_quality` 中说明；Incident 不存在返回 404。输出契约见 [ARCHITECTURE.md](ARCHITECTURE.md) §8。
 
 用户接口通过 `authorization: <token>` 传递身份；运维写接口与故障事件查询通过 `X-Admin-Token: <ADMIN_TOKEN>` 鉴权。
 
