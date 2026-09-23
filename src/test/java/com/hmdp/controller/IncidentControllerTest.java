@@ -6,6 +6,7 @@ import com.hmdp.enums.IncidentSeverity;
 import com.hmdp.enums.IncidentSource;
 import com.hmdp.enums.IncidentStatus;
 import com.hmdp.enums.IncidentType;
+import com.hmdp.interceptor.AdminAuthInterceptor;
 import com.hmdp.service.IncidentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -94,6 +95,39 @@ class IncidentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.found").value(false))
                 .andExpect(jsonPath("$.success").doesNotExist());
+    }
+
+    // ==================== 拦截器在真实 MVC 链路中的行为 ====================
+
+    @Test
+    void shouldBlockIncidentQueryWithoutAdminTokenInMvcChain() throws Exception {
+        MockMvc secured = securedMockMvc("secret-token");
+
+        secured.perform(get("/admin/incidents"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.success").value(false));
+        secured.perform(get("/admin/incidents/1"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void shouldAllowIncidentQueryWithAdminTokenInMvcChain() throws Exception {
+        MockMvc secured = securedMockMvc("secret-token");
+        when(incidentService.listIncidents(any(), any(), any(), any()))
+                .thenReturn(List.of(openIncident()));
+
+        secured.perform(get("/admin/incidents").header("X-Admin-Token", "secret-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.count").value(1));
+    }
+
+    private MockMvc securedMockMvc(String adminToken) {
+        IncidentController controller = new IncidentController();
+        ReflectionTestUtils.setField(controller, "incidentService", incidentService);
+        return MockMvcBuilders.standaloneSetup(controller)
+                .setControllerAdvice(new WebExceptionAdvice())
+                .addInterceptors(new AdminAuthInterceptor(adminToken))
+                .build();
     }
 
     private static Incident openIncident() {
