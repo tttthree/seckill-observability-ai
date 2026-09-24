@@ -50,10 +50,15 @@ def test_healthz_reports_configuration_without_secrets(http):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["prompt_version"] == "v2-3.1"
+    assert body["prompt_version"] == "v2-5.1"
     assert body["supported_context_versions"] == ["v2-2.1"]
     assert isinstance(body["model_configured"], bool)
     assert "api_key" not in json.dumps(body)
+    # V2-5：KB 状态可见（本仓库 runbooks/ 内 4 条有效知识，缺失/非法时也不阻塞服务启动）
+    assert body["rag_enabled"] is True
+    assert body["rag_ready"] is True
+    assert body["runbook_count"] == 4
+    assert body["invalid_runbook_count"] == 0
 
 
 def test_diagnosis_happy_path(http):

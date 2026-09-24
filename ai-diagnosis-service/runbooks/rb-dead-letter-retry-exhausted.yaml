@@ -1,0 +1,28 @@
+id: rb-dead-letter-retry-exhausted
+title: 死信消息（重试超限）处置手册
+version: "1"
+updated_at: 2026-09-24
+incident_types:
+  - DEAD_LETTER
+match_signals:
+  - dead_letter:present
+  - dead_letter:reason:retry_exhausted
+keywords:
+  - 死信
+  - 重试超限
+  - retry_exhausted
+  - 补偿
+  - 重放
+  - 库存回补
+summary: 订单消息重试超限后被原子补偿并写入死信 Stream，需要人工确认补偿结果并决定是否重放。
+checks:
+  - 确认死信条目中的 failure_reason 是否为 retry_exhausted，并核对 max_retry 与该消息的实际重试次数。
+  - 核对死信记录的 voucher_id / order_id 与数据库订单、Redis 库存及用户下单资格是否一致，判断补偿是否已回补库存。
+  - 确认死信 Stream 中该券的记录是否仍在：消失表示已重放或已清理，仍在则可能是重复死信。
+  - 若准备重放，先确认 replay-dead-letter.lua 的前置校验可满足（库存与资格），重放不得绕过一人一单约束。
+do_not:
+  - 禁止绕过一人一单与库存约束直接手工插入订单。
+  - 禁止在未确认补偿结果前重复执行补偿或重放。
+references:
+  - ARCHITECTURE.md#4-失败恢复
+  - ARCHITECTURE.md#5-一致性边界

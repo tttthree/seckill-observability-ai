@@ -26,6 +26,7 @@ from models.diagnosis import (
 from services.deepseek_client import DeepSeekClient, ModelCallError
 from services.evidence_validator import validate_evidence
 from services.prompt_builder import PROMPT_VERSION, build_prompt
+from services.runbook_retriever import RunbookRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,21 @@ def _clean_model_output(content: str) -> str:
 
 
 class DiagnosisService:
-    """无状态诊断编排器（可注入 stub client 以便离线测试）。"""
+    """无状态诊断编排器（可注入 stub client / stub retriever 以便离线测试）。
 
-    def __init__(self, settings: Settings, client: Optional[DeepSeekClient] = None) -> None:
+    `retriever=None` 表示不启用 Runbook RAG（prompt 中知识区段为空标记），
+    与 `RAG_ENABLED=false` 行为一致；生产装配见 app.py。
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        client: Optional[DeepSeekClient] = None,
+        retriever: Optional[RunbookRetriever] = None,
+    ) -> None:
         self._settings = settings
         self._client = client if client is not None else DeepSeekClient(settings)
+        self._retriever = retriever
 
     def diagnose(self, context: IncidentContext) -> DiagnosisResult:
         started = time.monotonic()
@@ -108,7 +119,10 @@ class DiagnosisService:
         if context_size > self._settings.max_context_chars:
             raise ContextTooLarge(context_size, self._settings.max_context_chars)
 
-        prompt = build_prompt(context)
+        # 4) Runbook 检索（RAG）：任何失败都降级为 no-RAG，绝不影响诊断本身
+        runbooks = self._retrieve_runbooks(incident.incident_id, context)
+
+        prompt = build_prompt(context, runbooks, self._settings.max_runbook_section_chars)
         if len(prompt) > self._settings.max_prompt_chars:
             raise PromptTooLarge(len(prompt), self._settings.max_prompt_chars)
 
@@ -217,6 +231,36 @@ class DiagnosisService:
             diagnosed_at=datetime.now(timezone.utc),
             elapsed_ms=elapsed_ms,
         )
+
+    def _retrieve_runbooks(self, incident_id: Optional[int], context: IncidentContext) -> tuple:
+        """检索通用知识条目；任何异常都降级为 no-RAG。
+
+        只记录条目 id 与分数，不记录知识正文；模型调用次数仍为 1 次（检索是纯本地计算）。
+        """
+        if self._retriever is None or not self._settings.rag_enabled:
+            return ()
+        try:
+            result = self._retriever.retrieve(context)
+        except Exception as exc:  # noqa: BLE001 - RAG 失败不得影响诊断
+            logger.warning(
+                "rag retrieval failed incident_id=%s error=%s",
+                incident_id,
+                type(exc).__name__,
+            )
+            return ()
+        if not result.runbooks:
+            logger.info(
+                "rag no_runbooks incident_id=%s candidates=%s", incident_id, result.candidates
+            )
+            return ()
+        logger.info(
+            "rag selected incident_id=%s candidates=%s selected=%s scores=%s",
+            incident_id,
+            result.candidates,
+            [item.id for item in result.runbooks],
+            [item.score for item in result.runbooks],
+        )
+        return result.runbooks
 
     def _insufficient_without_model(
         self, context_version: str, started: float, reason: str

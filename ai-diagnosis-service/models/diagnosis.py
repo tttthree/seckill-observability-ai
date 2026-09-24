@@ -138,3 +138,8 @@ class HealthResponse(_StrictModel):
     model_configured: bool
     supported_context_versions: List[str]
     prompt_version: str
+    # ---- V2-5 Runbook KB 状态（只报状态与计数，不返回任何知识内容）----
+    rag_enabled: bool
+    rag_ready: bool
+    runbook_count: int
+    invalid_runbook_count: int

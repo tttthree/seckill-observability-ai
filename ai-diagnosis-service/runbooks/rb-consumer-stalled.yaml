@@ -1,0 +1,29 @@
+id: rb-consumer-stalled
+title: 消费者停滞（存活但未成功消费）处置手册
+version: "1"
+updated_at: 2026-09-24
+incident_types:
+  - CONSUMER_UNHEALTHY
+match_signals:
+  - consumer:consumer_status:DEGRADED
+  - consumer:success_heartbeat_age_high
+  - consumer:heartbeat_age_high
+keywords:
+  - 停滞
+  - 成功消费心跳
+  - 死锁
+  - 慢查询
+  - GC
+  - pending
+summary: 消费者线程存活但长时间没有成功 ACK（成功消费心跳超过 60 秒），属于"活着但停滞"。
+checks:
+  - 核对 success_heartbeat_age_ms 与 heartbeat_age_ms：只有存活心跳在更新、成功心跳不动，即为消费停滞。
+  - 检查 pending_count 是否持续上升，并区分慢查询、死锁、Redis 连接池耗尽与 GC 停顿。
+  - 结合 runtime 段的 heap_used_bytes / thread_count / uptime_ms，判断是否存在内存压力或线程异常。
+  - 核对数据库事务耗时与慢查询情况，必要时由人工在业务低峰期重启消费者。
+do_not:
+  - 禁止仅凭停滞现象断定某笔订单已失败：停滞不等于订单丢失。
+  - 禁止自动重启进程或自动重放未确认的消息。
+references:
+  - ARCHITECTURE.md#7-故障事件层-incident
+  - alert.rules.yml#ConsumerStalled

@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 # 首次运行 pytest 时由缓存插件产生的临时目录（沙箱下可能残留）
 pytest-cache-files-*/
+# 测试用临时 KB 目录（沙箱不允许写系统临时区，改在服务目录内创建）
+.pytest-tmp/
 .env
 
 # 本地运行产物

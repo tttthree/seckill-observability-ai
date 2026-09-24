@@ -8,3 +8,5 @@ openai>=3.17,<4.0
 python-dotenv>=1.2,<2.0
 pytest>=9.1,<10.0
 httpx>=0.28,<1.0
+# Runbook KB（V2-5）：知识条目为人工评审的 YAML；显式声明，避免依赖 uvicorn[standard] 的传递依赖
+pyyaml>=6.0,<7.0

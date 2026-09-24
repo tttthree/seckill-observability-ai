@@ -1,7 +1,9 @@
-"""pytest 共享装置：fixture 加载与 stub 模型客户端。"""
+"""pytest 共享装置：fixture 加载、临时 KB 目录与 stub 模型客户端。"""
 
 import json
 import pathlib
+import shutil
+import uuid
 from typing import Optional
 
 import pytest
@@ -9,6 +11,9 @@ import pytest
 from models.context import IncidentContext
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "tests" / "fixtures"
+# 临时目录放在服务目录内（.pytest-tmp/，已 gitignore）：
+# 沙箱环境不允许 pytest 默认的 %TEMP%\pytest-of-* 写入，且这样不污染系统临时区。
+TMP_ROOT = pathlib.Path(__file__).parent / ".pytest-tmp"
 
 
 def load_fixture(name: str) -> dict:
@@ -38,6 +43,18 @@ def context_payload() -> dict:
 def missing_redis_payload() -> dict:
     """券维度 Redis 采集中断的派生样本。"""
     return load_fixture("incident_context_missing_redis.json")
+
+
+@pytest.fixture
+def runbook_tmp_dir():
+    """每个用例独立的临时目录（用于构造合法/损坏的 Runbook KB）。"""
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    directory = TMP_ROOT / f"case-{uuid.uuid4().hex[:8]}"
+    directory.mkdir()
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 @pytest.fixture

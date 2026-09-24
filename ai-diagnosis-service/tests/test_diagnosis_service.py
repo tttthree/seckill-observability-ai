@@ -48,7 +48,7 @@ def test_diagnosed_result_metadata_is_generated_by_service(context):
     assert result.context_version == "v2-2.1"
     assert result.incident_id == context.incident.incident_id
     assert result.model == settings.deepseek_model
-    assert result.prompt_version == "v2-3.1"
+    assert result.prompt_version == "v2-5.1"
     assert result.error_code is None
     assert result.diagnosed_at.tzinfo is not None
     assert result.elapsed_ms >= 0

@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     max_evidence_items: int = 10
     max_actions: int = 5
 
+    # ---- Runbook KB / RAG（V2-5）----
+    # KB 目录缺失/不可读/为空/全部非法时一律退化 no-RAG（不 fail fast）
+    rag_enabled: bool = True
+    runbooks_dir: str = "runbooks"
+    # 注入 prompt 的 runbook 段落总长度上限；超出时整条丢弃低排名条目（不截断正文）
+    max_runbook_section_chars: int = 4000
+
     log_level: str = "INFO"
     host: str = "127.0.0.1"
     port: int = 8000

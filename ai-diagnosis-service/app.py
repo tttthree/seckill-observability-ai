@@ -21,6 +21,8 @@ from services.diagnosis_service import (
     UnsupportedContextVersion,
 )
 from services.prompt_builder import PROMPT_VERSION
+from services.runbook_loader import load_runbook_store
+from services.runbook_retriever import RunbookRetriever
 
 settings = get_settings()
 
@@ -30,7 +32,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ai-diagnosis-service")
 
-diagnosis_service = DiagnosisService(settings)
+# V2-5：启动时一次性加载 Runbook KB。
+# KB 目录缺失/不可读/为空/全部非法一律 rag_ready=False 并退化 no-RAG，不阻塞服务启动。
+runbook_store = load_runbook_store(settings)
+runbook_retriever = RunbookRetriever(runbook_store)
+
+diagnosis_service = DiagnosisService(settings, retriever=runbook_retriever)
 
 
 @asynccontextmanager
@@ -42,6 +49,14 @@ async def lifespan(_: FastAPI):
         settings.model_configured,
         settings.supported_versions,
         PROMPT_VERSION,
+    )
+    logger.info(
+        "startup rag_enabled=%s rag_ready=%s runbook_count=%s invalid_runbook_count=%s reason=%s",
+        runbook_store.enabled,
+        runbook_store.ready,
+        runbook_store.count,
+        runbook_store.invalid_count,
+        runbook_store.reason,
     )
     yield
 
@@ -61,6 +76,10 @@ def healthz() -> HealthResponse:
         model_configured=settings.model_configured,
         supported_context_versions=settings.supported_versions,
         prompt_version=PROMPT_VERSION,
+        rag_enabled=runbook_store.enabled,
+        rag_ready=runbook_store.ready,
+        runbook_count=runbook_store.count,
+        invalid_runbook_count=runbook_store.invalid_count,
     )
 
 

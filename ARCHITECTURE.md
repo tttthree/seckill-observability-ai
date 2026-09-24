@@ -440,7 +440,61 @@ Java 本地降级结果的冻结语义：`diagnosis_status=UNAVAILABLE`、`root_
 
 `/admin/incidents/{id}/diagnosis` 命中 `AdminAuthInterceptor` 的 `/admin/incidents` 前缀规则：GET 也必须携带 `X-Admin-Token`，无/错令牌返回 403，拦截器与 MvcConfig **零改动**。
 
-## 12. 数据库
+## 12. Runbook KB 与 RAG（V2-5）
+
+在 IncidentContext（本次事故的事实）之外，Python 诊断服务还会注入**人工评审的通用运维知识**，帮助模型组织排查步骤；知识本身**不是**本次事故的事实。
+
+```text
+GET /admin/incidents/{id}/diagnosis
+        │  IncidentContext（V2-2 冻结契约）
+        ▼
+Python V2-5 DiagnosisService
+        ├─ RunbookRetriever ← runbooks/*.yaml（启动时一次性加载，构建后只读内存）
+        │     incident_type 硬过滤 → signal_hit*2 + keyword_hit*1 → score 降序 / id 升序 → Top-2
+        ▼
+  build_prompt：<incident_context>（事实）+ <runbook_knowledge>（通用知识）
+        ▼
+  DeepSeek 单次调用 → evidence 回校验（仍只认 IncidentContext）→ DiagnosisResult
+```
+
+### 12.1 边界（冻结）
+
+- 知识只来自 `ai-diagnosis-service/runbooks/*.yaml`（人工评审），**不引入** LangChain / LlamaIndex / 向量库 / Elasticsearch / embedding 服务；
+- 检索是**纯本地确定性计算**：无第三方依赖（仅用已在环境中的 PyYAML 读文件）、无分词依赖、无第二次模型调用；
+- `evidence[].path` **只能**来自 IncidentContext：`validate_evidence` 只在 Context 上解析 path，因此 Runbook 内容**结构上**不可能成为证据；
+- Python 响应契约（`DiagnosisResult`）与 Java V2-4 DTO/校验**零改动**：检索过程只进 Python 日志与 `/healthz` 计数；
+- 知识条目只有 `summary` / `checks` / `do_not` 进入 prompt（有长度上限），其余字段仅参与检索与审计。
+
+### 12.2 检索语义
+
+| 环节 | 规则 |
+|---|---|
+| 硬过滤 | `incident_types` 不含本次 `incident_type` → 排除 |
+| 打分 | 命中 `match_signals` 每条 +2；命中 `keywords` 每个 +1（最多计 3 个，子串匹配、小写比较） |
+| 排序 | `score` 降序 → `id` 升序（稳定、可复现） |
+| Top-K | **2**（常量，不做配置项） |
+| 阈值 | 无阈值：类型匹配即候选，是否注入由长度上限决定 |
+| 长度上限 | `MAX_RUNBOOK_SECTION_CHARS`（默认 4000），超限**整条丢弃**低排名条目（不截断正文） |
+| 无命中 | 注入显式空标记，明确告知"本次没有知识条目" |
+| 信号闭集 | 信号名取自闭集词表（计数器/死信/消费者/快照/Redis 状态）；阈值严格复用项目既有定义：`pending > 1000`、心跳 `> 30000ms`、成功心跳 `> 60000ms` |
+
+### 12.3 降级边界
+
+| 场景 | 行为 |
+|---|---|
+| KB 目录缺失 / 不可读 / 无 YAML / 全部条目非法 | `rag_ready=false` + WARN，**服务照常启动**，诊断退化为 no-RAG |
+| 单条知识非法（YAML 语法 / schema / 未知信号 / 重复 id） | 跳过该条并计入 `invalid_runbook_count`，其余条目可用 |
+| `RAG_ENABLED=false` | 不读 KB、不检索 |
+| 请求期检索异常 | 捕获 + WARN，本次诊断 no-RAG（**仍只有一次 DeepSeek 调用**） |
+
+只有 Settings 非法或确定性程序初始化错误才 fail fast；KB 问题**永不**阻塞服务启动。
+
+### 12.4 与 Java 的关系
+
+Java 侧**零改动**：不感知 Runbook 的存在，仍按 V2-4.1 校验响应（相关性 + V2-3.3 不变量 + 状态语义）。
+`PROMPT_VERSION` 升为 `v2-5.1`（Java 只要求非空）。检索结果（命中 id 与分数）只写入 Python 日志，供人工审计。
+
+## 13. 数据库
 
 数据库包含五张表：
 
@@ -454,6 +508,6 @@ tb_incident
 
 初始化脚本位于 `src/main/resources/db/hmdp.sql`，不包含用户手机号或课程样例数据。既有环境升级故障事件表执行 `src/main/resources/db/incident-migration.sql`（幂等）。
 
-## 13. 关闭顺序
+## 14. 关闭顺序
 
 应用关闭时先停止 Pending 定时认领，再停止主消费者拉取，等待执行中的任务结束，最后更新消费者健康状态，减少消息处理中断窗口。
