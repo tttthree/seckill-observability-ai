@@ -13,11 +13,14 @@ from services.runbook_retriever import RetrievalResult
 GOOD_LLM = {
     "diagnosis_status": "DIAGNOSED",
     "root_cause": "券维度 Redis 库存采集中断，构建时刻库存与检测证据不一致。",
+    "root_cause_evidence_paths": ["incident.status"],
     "evidence": [
         {"path": "incident.status", "note": "事件已恢复"},
         {"path": "redis.voucher_stock.value", "note": "构建时刻库存"},
     ],
-    "recommended_actions": [{"action": "人工核对库存", "rationale": "系统不自动覆盖"}],
+    "recommended_actions": [
+        {"action": "人工核对库存", "rationale": "系统不自动覆盖", "evidence_paths": ["incident.status"]}
+    ],
     "insufficient_reason": None,
 }
 
@@ -103,6 +106,7 @@ def test_runbook_named_paths_cannot_become_evidence(context):
     payload = {
         "diagnosis_status": "DIAGNOSED",
         "root_cause": "看似有根因",
+        "root_cause_evidence_paths": ["incident.status"],
         "evidence": [
             {"path": "incident.status", "note": "真实字段"},
             {"path": "runbook.checks[0]", "note": "编造的知识路径"},

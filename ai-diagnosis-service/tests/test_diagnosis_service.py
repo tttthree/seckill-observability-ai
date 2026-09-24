@@ -26,13 +26,21 @@ def make_service(payload=None, error=None, raw_text=None, **overrides):
 GOOD_LLM = {
     "diagnosis_status": "DIAGNOSED",
     "root_cause": "券维度 Redis 库存采集中断，构建时刻的库存状态与检测证据不一致。",
+    "root_cause_evidence_paths": [
+        "incident.detected_snapshot.redis_stock",
+        "redis.voucher_stock.value",
+    ],
     "evidence": [
         {"path": "incident.detected_snapshot.redis_stock", "note": "最近一次检测证据显示 Redis 库存为 0"},
         {"path": "redis.voucher_stock.value", "note": "构建时刻 Redis 库存已恢复为 1"},
         {"path": "database.seckill_voucher.stock", "note": "数据库库存为 1"},
     ],
     "recommended_actions": [
-        {"action": "人工核对券 7001 的 Redis 与 MySQL 库存", "rationale": "系统不会自动覆盖库存"}
+        {
+            "action": "人工核对券 7001 的 Redis 与 MySQL 库存",
+            "rationale": "系统不会自动覆盖库存",
+            "evidence_paths": ["database.seckill_voucher.stock"],
+        }
     ],
     "insufficient_reason": None,
 }
@@ -48,7 +56,7 @@ def test_diagnosed_result_metadata_is_generated_by_service(context):
     assert result.context_version == "v2-2.1"
     assert result.incident_id == context.incident.incident_id
     assert result.model == settings.deepseek_model
-    assert result.prompt_version == "v2-5.1"
+    assert result.prompt_version == "v2-6.1"
     assert result.error_code is None
     assert result.diagnosed_at.tzinfo is not None
     assert result.elapsed_ms >= 0
@@ -68,9 +76,15 @@ def test_action_requires_human_is_forced_by_service(context):
     payload = {
         "diagnosis_status": "DIAGNOSED",
         "root_cause": "x",
+        "root_cause_evidence_paths": ["incident.status"],
         "evidence": [{"path": "incident.status", "note": "n"}],
         "recommended_actions": [
-            {"action": "自动回滚库存", "rationale": "看起来更快", "requires_human": False}
+            {
+                "action": "自动回滚库存",
+                "rationale": "看起来更快",
+                "requires_human": False,
+                "evidence_paths": ["incident.status"],
+            }
         ],
         "insufficient_reason": None,
     }
@@ -84,7 +98,8 @@ def test_action_requires_human_is_forced_by_service(context):
 def test_actions_are_capped(context):
     payload = dict(GOOD_LLM)
     payload["recommended_actions"] = [
-        {"action": f"a{i}", "rationale": "r"} for i in range(9)
+        {"action": f"a{i}", "rationale": "r", "evidence_paths": ["redis.voucher_stock.value"]}
+        for i in range(9)
     ]
     service, _, settings = make_service(payload=payload)
 

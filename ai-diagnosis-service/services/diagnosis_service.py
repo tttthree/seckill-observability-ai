@@ -24,6 +24,13 @@ from models.diagnosis import (
     RecommendedAction,
 )
 from services.deepseek_client import DeepSeekClient, ModelCallError
+from services.claim_grounding import (
+    MIN_ROOT_CITATIONS,
+    collect_action_paths,
+    evaluate_root_grounding,
+    filter_grounded_actions,
+    prioritize_evidence,
+)
 from services.evidence_validator import validate_evidence
 from services.prompt_builder import PROMPT_VERSION, build_prompt
 from services.runbook_retriever import RunbookRetriever
@@ -169,17 +176,31 @@ class DiagnosisService:
             )
             return self._unavailable(base, started, ErrorCode.MODEL_OUTPUT_INVALID)
 
-        # 5) 证据回校验：observed 一律取 Context 真实值
+        # 5) V2-6 claim grounding（重排阶段）：只做**稳定重排序**，不新增/删除 evidence item。
+        #    citation 只能引用同一次输出里的 evidence[].path；path 合法性仍由 evidence_validator 唯一判定。
+        ordered_evidence = prioritize_evidence(
+            parsed.evidence,
+            parsed.root_cause_evidence_paths,
+            collect_action_paths(parsed.recommended_actions),
+        )
+
+        # 6) 证据回校验：observed 一律取 Context 真实值（四统计语义与 V2-3.3 完全一致）
         context_json = context.model_dump(mode="json")
         evidence, validation = validate_evidence(
-            context_json, parsed.evidence, self._settings.max_evidence_items
+            context_json, ordered_evidence, self._settings.max_evidence_items
         )
+        accepted_paths = {item.path for item in evidence}
 
         status = parsed.diagnosis_status
         root_cause = (parsed.root_cause or "").strip() or None
         insufficient_reason = (parsed.insufficient_reason or "").strip() or None
 
-        # 6) 语义校验：DIAGNOSED 必须有可回溯的证据与 root_cause
+        # 7) claim grounding：root_cause 至少要有 1 条 citation 落在最终 accepted evidence 上
+        root_cited, root_accepted, root_invalid = evaluate_root_grounding(
+            parsed.root_cause_evidence_paths, accepted_paths
+        )
+
+        # 8) 语义校验：DIAGNOSED 必须有可回溯的证据、root_cause 及其 citation
         if status == DiagnosisStatus.DIAGNOSED.value:
             if not evidence:
                 status = DiagnosisStatus.INSUFFICIENT_EVIDENCE.value
@@ -189,14 +210,23 @@ class DiagnosisService:
             elif root_cause is None:
                 status = DiagnosisStatus.INSUFFICIENT_EVIDENCE.value
                 insufficient_reason = "模型给出 DIAGNOSED，但 root_cause 为空。"
+            elif root_accepted < MIN_ROOT_CITATIONS:
+                status = DiagnosisStatus.INSUFFICIENT_EVIDENCE.value
+                insufficient_reason = (
+                    "模型给出 DIAGNOSED，但 root_cause 没有引用任何最终被采纳的证据"
+                    "（root_cause_evidence_paths 为空或其引用的 path 未通过回校验）。"
+                )
 
-        # 7) 动作：截断 + 强制 requires_human
+        # 9) 动作：先按既有上限截断，再做 grounding 过滤（无有效 citation 的 action 只丢弃该条）
+        grounded_actions, dropped_actions = filter_grounded_actions(
+            parsed.recommended_actions, accepted_paths, self._settings.max_actions
+        )
         actions = [
             RecommendedAction(action=a.action, rationale=a.rationale, requires_human=True)
-            for a in parsed.recommended_actions[: self._settings.max_actions]
+            for a in grounded_actions
         ]
 
-        # 8) INSUFFICIENT_EVIDENCE 统一正规化：
+        # 10) INSUFFICIENT_EVIDENCE 统一正规化：
         #    无论是模型主动返回还是由 DIAGNOSED 降级而来，都不得携带 root_cause / actions / error_code；
         #    已通过回校验的 evidence 可以保留。
         if status == DiagnosisStatus.INSUFFICIENT_EVIDENCE.value:
@@ -204,6 +234,22 @@ class DiagnosisService:
             actions = []
             if insufficient_reason is None:
                 insufficient_reason = _DEFAULT_INSUFFICIENT_REASON
+
+        downgraded = (
+            parsed.diagnosis_status == DiagnosisStatus.DIAGNOSED.value
+            and status == DiagnosisStatus.INSUFFICIENT_EVIDENCE.value
+        )
+        # 只记录计数，绝不记录 claim 正文 / Context / Runbook 正文
+        logger.info(
+            "diagnosis grounding incident_id=%s root_cited=%s root_accepted=%s invalid=%s "
+            "dropped_actions=%s downgraded=%s",
+            base["incident_id"],
+            root_cited,
+            root_accepted,
+            root_invalid,
+            dropped_actions,
+            downgraded,
+        )
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(

@@ -492,9 +492,53 @@ Python V2-5 DiagnosisService
 ### 12.4 与 Java 的关系
 
 Java 侧**零改动**：不感知 Runbook 的存在，仍按 V2-4.1 校验响应（相关性 + V2-3.3 不变量 + 状态语义）。
-`PROMPT_VERSION` 升为 `v2-5.1`（Java 只要求非空）。检索结果（命中 id 与分数）只写入 Python 日志，供人工审计。
+V2-5 将 `PROMPT_VERSION` 升为 `v2-5.1`（V2-6 起为 `v2-6.1`；Java 只要求该字段非空）。
+检索结果（命中 id 与分数）只写入 Python 日志，供人工审计。
 
-## 13. 数据库
+## 13. claim-level grounding（V2-6）
+
+V2-3 的证据回校验保证"证据本身真实"；V2-6 补上"结论必须挂到真实证据上"这一层，解决
+`root_cause` / `recommended_actions` 可能"比证据更强"的问题（例如把"当前两端一致且事件已 RESOLVED"
+写成"已被某流程修复"）。
+
+```text
+模型输出（同一次调用）
+  ├─ evidence[]                       ← 唯一证据池
+  ├─ root_cause + root_cause_evidence_paths      ← claim citation（只引用上面的 path）
+  └─ recommended_actions[] + evidence_paths      ← action citation
+        ▼
+  稳定重排序 evidence（root citation → action citation → 其余；不增删条目）
+        ▼
+  evidence_validator.validate_evidence()          ← 仍是 path / observed / counter_presence 唯一权威
+        ▼
+  以最终 accepted evidence.path 集合校验 citation
+        ├─ root_cause 无有效 citation → INSUFFICIENT_EVIDENCE（正规化）
+        └─ 单条 action 无有效 citation → 只丢弃该 action
+```
+
+### 13.1 冻结规则
+
+- citation **不是第二套 evidence**：`root_cause_evidence_paths` / action `evidence_paths` 只能引用同一次输出里
+  已经存在的 `evidence[].path`；不要求模型之外的任何解析，**不新增第二套 validator**；
+- `services/evidence_validator.py` **零改动**，仍是 path 合法性 / `observed` 回填 / `counter_presence` 的唯一来源；
+- 调用 `validate_evidence()` 之前只允许对 `parsed.evidence` 做**稳定重排序**（不新增、不删除、不去重）：
+  root citation 对应条目优先，其次 action citation，最后是未被引用的条目（分桶内保持原相对顺序）；
+- 因此 `submitted / accepted / dropped / over_limit` 四统计语义与 V2-3.3 **完全一致**
+  （真实 `15/10/0/5` 场景仍为 `15/10/0/5`），只有 `accepted` 的**具体 path 集合**可能因优先级变化；
+- `DIAGNOSED` 必须至少有 **1 条** root citation 最终 accepted；为空或全无效 → 降级 `INSUFFICIENT_EVIDENCE`；
+  部分有效 → 保留 `DIAGNOSED`，只记录 invalid 计数；
+- 单条 action 至少有 1 条 citation 最终 accepted 才保留，否则**只丢弃该条**（不降级整份诊断）；
+- citations 仅内部使用：不进入 `DiagnosisResult`、不进入 Java、不进入 `evidence_validation` 统计、不落库；
+- 日志只记录计数（`root_cited` / `root_accepted` / `invalid` / `dropped_actions` / `downgraded`），
+  不打印 claim 正文、Context 或 Runbook 正文；
+- 仍然只有**一次** DeepSeek 调用；无 verifier LLM、无 NLI、无新框架。
+
+### 13.2 与 Java 的关系
+
+Java **零改动**：`DiagnosisResult` 字段集合不变，V2-4.1 的相关性/非空/V2-3.3 不变量/状态语义校验全部照旧。
+`PROMPT_VERSION` 升为 `v2-6.1`（Java 只校验非空）。
+
+## 14. 数据库
 
 数据库包含五张表：
 
@@ -508,6 +552,6 @@ tb_incident
 
 初始化脚本位于 `src/main/resources/db/hmdp.sql`，不包含用户手机号或课程样例数据。既有环境升级故障事件表执行 `src/main/resources/db/incident-migration.sql`（幂等）。
 
-## 14. 关闭顺序
+## 15. 关闭顺序
 
 应用关闭时先停止 Pending 定时认领，再停止主消费者拉取，等待执行中的任务结束，最后更新消费者健康状态，减少消息处理中断窗口。

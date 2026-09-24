@@ -1,6 +1,6 @@
 id: rb-inventory-mismatch
 title: 库存不一致（Redis vs MySQL）处置手册
-version: "2"
+version: "3"
 updated_at: 2026-09-24
 incident_types:
   - INVENTORY_MISMATCH
@@ -24,7 +24,7 @@ checks:
   - 对比 incident.detected_snapshot（检测时刻证据）与 redis / database 两段（构建时刻状态）的库存值，判断偏差在构建时刻是否仍然存在。
   - 核对 database.order_count_for_voucher 与 Redis 已下单用户基数是否一致，排查超卖或订单漏记。
   - 检查 seckill:reconcile:mismatch:<voucherId> 标记在构建时刻是否存在（present=false 只表示当时未观察到该标记；Context 不提供它的历史清除时间，不得据此推断被误删）。
-  - 结合 incident.status 与 first_detected_at / last_detected_at / resolved_at 时间线，判断该事件是否已由对账恢复。
+  - 结合 incident.status / resolved_at 与构建时刻 redis / database 两端库存是否一致，判断事件是否已恢复；incident.source=RECONCILE 只表示检测来源，不代表对账流程执行了库存修复。
 do_not:
   - 禁止用任何方式自动覆盖 Redis 或 MySQL 库存：对账只记录与告警，不执行修复。
   - 禁止在缺少两端同时刻证据时把偏差归因于某个组件。

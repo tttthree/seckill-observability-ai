@@ -16,8 +16,11 @@ from services.diagnosis_service import DiagnosisService
 GOOD_LLM = {
     "diagnosis_status": "DIAGNOSED",
     "root_cause": "构建时刻 Redis 与 MySQL 库存已一致，故障已恢复。",
+    "root_cause_evidence_paths": ["incident.status"],
     "evidence": [{"path": "incident.status", "note": "事件状态为 RESOLVED"}],
-    "recommended_actions": [{"action": "人工复核对账记录", "rationale": "确认无残留偏差"}],
+    "recommended_actions": [
+        {"action": "人工复核对账记录", "rationale": "确认无残留偏差", "evidence_paths": ["incident.status"]}
+    ],
     "insufficient_reason": None,
 }
 
@@ -50,7 +53,7 @@ def test_healthz_reports_configuration_without_secrets(http):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["prompt_version"] == "v2-5.1"
+    assert body["prompt_version"] == "v2-6.1"
     assert body["supported_context_versions"] == ["v2-2.1"]
     assert isinstance(body["model_configured"], bool)
     assert "api_key" not in json.dumps(body)

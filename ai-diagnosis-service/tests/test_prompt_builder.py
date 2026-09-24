@@ -11,7 +11,7 @@ from services.prompt_builder import (
 
 
 def test_prompt_version_is_pinned():
-    assert PROMPT_VERSION == "v2-5.1"
+    assert PROMPT_VERSION == "v2-6.1"
 
 
 def test_system_prompt_contains_hard_rules():

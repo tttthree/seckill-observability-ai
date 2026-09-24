@@ -17,7 +17,7 @@ from typing import Iterable, Sequence
 from models.context import IncidentContext
 from models.runbook import RetrievedRunbook
 
-PROMPT_VERSION = "v2-5.1"
+PROMPT_VERSION = "v2-6.1"
 
 # 没有命中任何知识条目时的显式标记（避免模型误以为知识被省略）
 _EMPTY_KNOWLEDGE = "（本次未检索到相关知识条目）"
@@ -103,14 +103,28 @@ SYSTEM_PROMPT = """你是秒杀系统的故障诊断助手，输入是一份已�
 - 没有知识条目（空标记）时照常诊断，不得因此降低结论或编造知识。
 
 ====================
-九、输出格式
+九、claim citation（结论必须挂到自己的证据上）
+====================
+- root_cause 必须用 root_cause_evidence_paths 声明它依据的证据；每条 recommended_actions 用 evidence_paths 声明依据。
+- citation 只能填写**你在本次输出的 evidence[].path 里已经写过的 path**，逐字一致；不得引用 runbook 内容、
+  不得发明新 path、不得引用 <incident_context> 中不存在的字段。
+- 服务端只认最终被采纳的证据：root_cause 的 citation 若为空或全部无法采纳，整份诊断会被降级为
+  INSUFFICIENT_EVIDENCE；某条 action 的 citation 为空或全部无法采纳时，该条 action 会被丢弃。
+- 因此：先确认证据成立，再写结论；结论的强度不得超过 citation 所指向证据能支持的范围
+  （例如只能证明"当前两端库存一致且事件已 RESOLVED"，就不要写成"已被某流程修复"）。
+
+====================
+十、输出格式
 ====================
 只返回一个合法 json 对象，不要 markdown、不要代码块、不要多余解释，字段固定为：
 {
   "diagnosis_status": "DIAGNOSED" 或 "INSUFFICIENT_EVIDENCE",
   "root_cause": "字符串；DIAGNOSED 时必填；INSUFFICIENT_EVIDENCE 时可为 null",
+  "root_cause_evidence_paths": ["只能来自本次 evidence[].path 的 path；DIAGNOSED 时至少 1 条"],
   "evidence": [{"path": "字段路径", "note": "一句中文说明"}],
-  "recommended_actions": [{"action": "给人执行的动作", "rationale": "理由"}],
+  "recommended_actions": [
+    {"action": "给人执行的动作", "rationale": "理由", "evidence_paths": ["本次 evidence[].path 中的 path"]}
+  ],
   "insufficient_reason": "字符串；INSUFFICIENT_EVIDENCE 时必填，否则为 null"
 }
 """
