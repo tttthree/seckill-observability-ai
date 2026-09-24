@@ -1,7 +1,8 @@
-"""V2-3 AI Diagnosis Service 入口。
+"""V2-3 / V2-5 AI Diagnosis Service 入口。
 
-只做三件事：接收 V2-2 IncidentContext JSON → 调用模型做**语义**诊断 → 返回结构化 DiagnosisResult。
-不连 Redis/MySQL，不执行任何运维动作，不做 RAG。
+只做三件事：接收 V2-2 IncidentContext JSON → （V2-5：注入人工评审的 Runbook 通用知识）
+调用模型做**语义**诊断 → 返回结构化 DiagnosisResult。
+不连 Redis/MySQL，不执行任何运维动作；知识检索为本地确定性计算，不是 Agent/RAG 平台。
 """
 
 import logging

@@ -63,11 +63,14 @@ def derive_signals(context: IncidentContext) -> frozenset:
 
     metrics = context.metrics
     if metrics is not None:
-        for name, present in (metrics.counter_presence or {}).items():
+        presence = metrics.counter_presence or {}
+        counters = metrics.counters or {}
+        for name, present in presence.items():
             if present is True and name in KNOWN_COUNTERS:
                 signals.add(f"counter_present:{name}")
-        for name, value in (metrics.counters or {}).items():
-            if name in KNOWN_COUNTERS and _positive_number(value):
+        for name, value in counters.items():
+            # 与 evidence 回校验同一语义：presence 不严格为 true 的计数器不得参与检索
+            if name in KNOWN_COUNTERS and presence.get(name) is True and _positive_number(value):
                 signals.add(f"counter_positive:{name}")
 
     redis = context.redis

@@ -154,6 +154,29 @@ def test_derive_signals_for_real_fixture(context):
     assert "consumer:pending_high" not in signals
 
 
+def test_counter_positive_requires_presence_true(context_payload):
+    """presence=false 的计数器（即使数值为正）不得参与检索。"""
+    data = clone(context_payload)
+    data["metrics"]["counters"]["consume_error"] = 5.0
+    data["metrics"]["counter_presence"]["consume_error"] = False
+    data["metrics"]["counters"]["commit_error"] = 7.0
+    data["metrics"]["counter_presence"]["commit_error"] = True
+    context_with_presence = IncidentContext.model_validate(data)
+
+    signals = derive_signals(context_with_presence)
+
+    assert "counter_positive:consume_error" not in signals
+    assert "counter_present:consume_error" not in signals
+    assert "counter_positive:commit_error" in signals
+
+    retriever = RunbookRetriever(make_store(
+        make_runbook("rb-presence", ["INVENTORY_MISMATCH"], signals=["counter_positive:consume_error"]),
+    ))
+    result = retriever.retrieve(context_with_presence)
+
+    assert result.runbooks[0].score == 0, "presence=false 的 counter 不得贡献检索分数"
+
+
 def test_pending_high_requires_strictly_greater_than_1000(context_payload):
     at_threshold = derive_signals(consumer_context(context_payload, pending_count=1000))
     above_threshold = derive_signals(consumer_context(context_payload, pending_count=1001))

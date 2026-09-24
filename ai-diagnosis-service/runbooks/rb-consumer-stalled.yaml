@@ -1,13 +1,12 @@
 id: rb-consumer-stalled
 title: 消费者停滞（存活但未成功消费）处置手册
-version: "1"
+version: "2"
 updated_at: 2026-09-24
 incident_types:
   - CONSUMER_UNHEALTHY
 match_signals:
   - consumer:consumer_status:DEGRADED
   - consumer:success_heartbeat_age_high
-  - consumer:heartbeat_age_high
 keywords:
   - 停滞
   - 成功消费心跳
@@ -15,12 +14,12 @@ keywords:
   - 慢查询
   - GC
   - pending
-summary: 消费者线程存活但长时间没有成功 ACK（成功消费心跳超过 60 秒），属于"活着但停滞"。
+summary: 消费者线程存活、但仍有未 ACK 消息且长时间没有成功消费（pending_count > 0 且 success_heartbeat_age_ms > 60000，即 consumer_status=DEGRADED）。
 checks:
-  - 核对 success_heartbeat_age_ms 与 heartbeat_age_ms：只有存活心跳在更新、成功心跳不动，即为消费停滞。
-  - 检查 pending_count 是否持续上升，并区分慢查询、死锁、Redis 连接池耗尽与 GC 停顿。
-  - 结合 runtime 段的 heap_used_bytes / thread_count / uptime_ms，判断是否存在内存压力或线程异常。
-  - 核对数据库事务耗时与慢查询情况，必要时由人工在业务低峰期重启消费者。
+  - 先确认判定条件：pending_count > 0 且 success_heartbeat_age_ms > 60000（对应 consumer_status=DEGRADED），且消费者存活（consumer_alive=true / status=UP）；心跳超过 30 秒属于 DOWN 路径，不是停滞。
+  - 核对 success_heartbeat_age_ms 与 heartbeat_age_ms：只有存活心跳在更新、成功心跳不动，即为长时间没有成功消费。
+  - 检查 pending_count 与 queue.consumer_group.pending_total 是否持续偏高，并按证据区分慢查询、死锁、Redis 连接池耗尽与 GC 停顿等可能原因。
+  - 结合 runtime 段的 heap_used_bytes / thread_count / uptime_ms，判断是否存在内存压力或线程异常，必要时由人工在业务低峰期重启消费者。
 do_not:
   - 禁止仅凭停滞现象断定某笔订单已失败：停滞不等于订单丢失。
   - 禁止自动重启进程或自动重放未确认的消息。

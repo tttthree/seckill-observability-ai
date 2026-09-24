@@ -1,6 +1,6 @@
 id: rb-consumer-down
 title: 消费者不可用处置手册
-version: "1"
+version: "2"
 updated_at: 2026-09-24
 incident_types:
   - CONSUMER_UNHEALTHY
@@ -14,12 +14,12 @@ keywords:
   - 未启动
   - pending
   - DOWN
-summary: 消费者线程不可用（未启动、心跳超时或 Pending 堆积超过阈值 1000），消费链路已停止推进。
+summary: 健康检查判定消费者 DOWN：可能是消费者线程未启动、心跳超时（超过 30 秒）或 Pending 严重积压（超过 1000），需要区分具体原因。
 checks:
   - 区分三种 DOWN 原因：消费者线程未启动、消费者心跳超时（超过 30 秒）、Stream Pending 堆积（超过 1000）。
-  - 核对 consumer_health.heartbeat_age_ms 与 consumer_status，判断是线程退出、GC 停顿还是 Redis 连接异常。
-  - Pending 堆积时核对消费者组 PEL 与待处理消息量，判断是消费变慢还是完全停止推进。
-  - 确认应用进程是否仍在运行、消费者线程是否已被标记停止，必要时由人工重启并持续观察恢复情况。
+  - 核对 consumer_health.heartbeat_age_ms 与 consumer_status，判断是线程退出、GC 停顿还是 Redis 连接异常导致。
+  - Pending 堆积时核对 consumer_health.pending_count 与 queue.consumer_group.pending_total，判断是消费变慢还是长时间没有推进。
+  - 确认应用进程是否仍在运行、消费者线程是否已被标记停止（consumer_alive），必要时由人工重启并持续观察恢复情况。
 do_not:
   - 禁止在没有人工确认的情况下自动 resolve 故障事件或清理 Pending / PEL。
   - 禁止把消费者不可用当作库存不足等业务问题处理。

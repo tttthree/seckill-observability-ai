@@ -1,8 +1,10 @@
 """Runbook KB 加载测试：逐条校验、异常一律降级 no-RAG、绝不阻塞服务。"""
 
+import pytest
 import yaml
 
 from config import Settings
+from models.runbook import Runbook
 from services.runbook_loader import load_runbook_store, resolve_runbooks_dir
 
 VALID = {
@@ -130,6 +132,19 @@ def test_rag_disabled_never_reads_directory(runbook_tmp_dir):
     assert store.ready is False
     assert store.count == 0
     assert store.reason == "disabled"
+
+
+def test_unexpected_program_error_is_not_swallowed(runbook_tmp_dir, monkeypatch):
+    """只有知识文件层面的预期异常才降级为 invalid；确定性程序错误必须 fail fast。"""
+    write_runbook(runbook_tmp_dir, "valid.yaml", VALID)
+
+    def boom(cls, value):
+        raise RuntimeError("deterministic program error")
+
+    monkeypatch.setattr(Runbook, "model_validate", classmethod(boom))
+
+    with pytest.raises(RuntimeError):
+        load_runbook_store(make_settings(runbook_tmp_dir))
 
 
 def test_repository_runbooks_are_valid_and_ready():

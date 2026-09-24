@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from config import Settings
 from models.runbook import Runbook
@@ -69,7 +70,9 @@ def load_runbook_store(settings: Settings) -> RunbookStore:
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             runbook = Runbook.model_validate(raw)
-        except Exception as exc:  # noqa: BLE001 - 单条知识非法不得影响服务
+        except (OSError, UnicodeError, yaml.YAMLError, ValidationError) as exc:
+            # 只吞「知识文件本身的问题」：IO / 编码 / YAML 语法 / schema 校验；
+            # 其它异常（确定性程序错误）继续向上抛，fail fast。
             invalid += 1
             logger.warning("runbook invalid file=%s error=%s", path.name, type(exc).__name__)
             continue
