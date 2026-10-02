@@ -10,24 +10,12 @@
 - citation 仅内部使用：不进入 `DiagnosisResult`、不进入 Java、不进入 `evidence_validation`、不落库。
 """
 
-from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Set, Tuple
 
 from models.diagnosis import LLMAction, LLMEvidence
 
 # root_cause 至少需要 1 条最终 accepted 的 citation（不要求 ≥2）
 MIN_ROOT_CITATIONS = 1
-
-
-@dataclass(frozen=True)
-class GroundingOutcome:
-    """只包含计数，用于结构化日志（绝不记录 claim 正文）。"""
-
-    root_cited: int
-    root_accepted: int
-    root_invalid: int
-    dropped_actions: int
-    downgraded: bool
 
 
 def unique_paths(paths: Iterable[str]) -> List[str]:

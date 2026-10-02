@@ -178,10 +178,11 @@ class DiagnosisService:
 
         # 5) V2-6 claim grounding（重排阶段）：只做**稳定重排序**，不新增/删除 evidence item。
         #    citation 只能引用同一次输出里的 evidence[].path；path 合法性仍由 evidence_validator 唯一判定。
+        candidate_actions = parsed.recommended_actions[: self._settings.max_actions]
         ordered_evidence = prioritize_evidence(
             parsed.evidence,
             parsed.root_cause_evidence_paths,
-            collect_action_paths(parsed.recommended_actions),
+            collect_action_paths(candidate_actions),
         )
 
         # 6) 证据回校验：observed 一律取 Context 真实值（四统计语义与 V2-3.3 完全一致）
@@ -219,7 +220,7 @@ class DiagnosisService:
 
         # 9) 动作：先按既有上限截断，再做 grounding 过滤（无有效 citation 的 action 只丢弃该条）
         grounded_actions, dropped_actions = filter_grounded_actions(
-            parsed.recommended_actions, accepted_paths, self._settings.max_actions
+            candidate_actions, accepted_paths, self._settings.max_actions
         )
         actions = [
             RecommendedAction(action=a.action, rationale=a.rationale, requires_human=True)

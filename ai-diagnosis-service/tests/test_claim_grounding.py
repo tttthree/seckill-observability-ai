@@ -64,6 +64,27 @@ def diagnosed_payload(evidence_paths, root_citations, actions=(), root_cause="�
 # ==================== 单元层：重排 / 计数 / action 过滤 ====================
 
 
+def test_actions_beyond_limit_cannot_change_accepted_paths(context, caplog):
+    root, filler, excluded, excluded_second, candidate = VALID_PATHS[:5]
+    actions = [
+        {"action": "核对", "rationale": "依据证据", "evidence_paths": [candidate]}
+        for _ in range(5)
+    ]
+    payload = diagnosed_payload([root, filler, excluded, excluded_second, candidate], [root], actions)
+    service, _, _ = make_service(payload, max_evidence_items=2, max_actions=5)
+    baseline = service.diagnose(context)
+    payload["recommended_actions"].append(
+        {"action": "不返回", "rationale": "不应参与重排", "evidence_paths": [excluded, excluded_second]}
+    )
+    service, _, _ = make_service(payload, max_evidence_items=2, max_actions=5)
+    with caplog.at_level(logging.INFO):
+        result = service.diagnose(context)
+    assert [e.path for e in result.evidence] == [e.path for e in baseline.evidence] == [root, candidate]
+    assert len(result.recommended_actions) == 5
+    assert result.evidence_validation.over_limit == 3
+    assert "dropped_actions=0" in caplog.text
+
+
 def test_prioritize_evidence_is_a_stable_permutation():
     items = [LLMEvidence(path=f"p{index}") for index in range(6)]
 
