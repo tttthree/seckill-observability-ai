@@ -377,6 +377,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
                     VoucherOrder voucherOrder = BeanUtil.fillBeanWithMap(values, new VoucherOrder(), true);
                     if (orderExistsInDB(voucherOrder.getId())) {
+                        clearRecoveryPending(voucherOrder);
                         stringRedisTemplate.opsForStream()
                                 .acknowledge(QUEUE_NAME, CONSUMER_GROUP, record.getId());
                         continue;
@@ -444,10 +445,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      * 查 DB 判断订单是否已存在（Pending 重试前使用，减少无效事务）
      */
     private boolean orderExistsInDB(Long orderId) {
-        return lambdaQuery()
-                .eq(VoucherOrder::getId, orderId)
-                .count()
-                > 0;
+        return getById(orderId) != null;
+    }
+
+    /** 必须在事务代理返回（已提交）或同 orderId 已存在的确认之后调用。 */
+    private void clearRecoveryPending(VoucherOrder order) {
+        Long removed = stringRedisTemplate.opsForSet().remove(
+                RedisConstants.DEAD_RECOVERY_KEY + order.getVoucherId(), String.valueOf(order.getId()));
+        if (removed == null) throw new IllegalStateException("recovery marker 清理结果不可确认");
     }
 
     /**
@@ -455,10 +460,20 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      */
     public void handleVoucherOrder(VoucherOrder voucherOrder) {
         try {
+            if (orderExistsInDB(voucherOrder.getId())) {
+                clearRecoveryPending(voucherOrder);
+                return;
+            }
             voucherOrderService.createVoucherOrder(voucherOrder);
+            clearRecoveryPending(voucherOrder);
             // 事务提交成功后埋点（Redis 原子计数器，Prometheus 通过 Gauge 采集）
             incrMetric(M_COMMIT_SUCCESS);
         }  catch (DuplicateKeyException e) {
+            // 唯一键冲突本身不能证明该 orderId 成功（可能是同用户另一订单）。
+            if (!orderExistsInDB(voucherOrder.getId())) {
+                throw new OrderCreateFailedException("重复键但当前 orderId 未确认落库，保留恢复标记", e);
+            }
+            clearRecoveryPending(voucherOrder);
             // 主键冲突（orderId 重复），极端并发下的防御性兜底；真正的"一人一单"由 Lua SISMEMBER 保证
             incrMetric(M_DUPLICATE_REQUEST);
             log.warn("主键冲突 orderId={}, userId={}, voucherId={}",

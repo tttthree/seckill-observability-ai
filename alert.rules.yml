@@ -53,7 +53,7 @@ groups:
 
       # ========== 消费者停滞告警（活着但长时间未成功消费） ==========
       - alert: ConsumerStalled
-        expr: (seckill_consumer_health == 1) and (seckill_consumer_pending_count > 0) and (seckill_consumer_success_heartbeat_age_ms > 60000)
+        expr: (seckill_consumer_success_heartbeat_age_ms > 60000) and (seckill_consumer_health == 1) and (seckill_consumer_pending_count > 0)
         for: 2m
         labels:
           severity: warning

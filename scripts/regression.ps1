@@ -112,6 +112,7 @@ $targetStream = "regression:target:$suffix"
 $stockKey = "regression:stock:$suffix"
 $orderedKey = "regression:ordered:$suffix"
 $retryKey = "regression:retry:$suffix"
+$recoveryKey = "regression:recovery:$suffix"
 $group = "regression-group"
 $consumer = "regression-consumer"
 $testUserId = "900001"
@@ -142,14 +143,15 @@ try {
     $deadId = [string]$deadRecord[0]
     $replayResult = [string](Invoke-Redis -Command @(
         "--eval", "src/main/resources/replay-dead-letter.lua",
-        $deadStream, $targetStream, $stockKey, $orderedKey, ",",
+        $deadStream, $targetStream, $stockKey, $orderedKey, $recoveryKey, ",",
         $deadId.Trim(), $testUserId, $testVoucherId, $testOrderId, "HELD"))
     Assert-True ($replayResult.Trim() -eq "1") "dead-letter replay script failed"
+    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $recoveryKey, $testOrderId))).Trim() -eq "1") "replay recovery marker missing"
     Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "0") "HELD replay changed inventory"
     Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "1") "HELD replay changed eligibility"
 }
 finally {
-    Invoke-Redis -Command @("DEL", $sourceStream, $deadStream, $targetStream, $stockKey, $orderedKey, $retryKey) | Out-Null
+    Invoke-Redis -Command @("DEL", $sourceStream, $deadStream, $targetStream, $stockKey, $orderedKey, $retryKey, $recoveryKey) | Out-Null
 }
 
 Write-Host "[7/8] Triggering reconciliation and validating metrics"

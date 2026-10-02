@@ -23,10 +23,11 @@ LUA.lua_tolstring.restype = ctypes.c_char_p
 LUA.lua_close.argtypes = [ctypes.c_void_p]
 
 HARNESS = """
-values = {}; sets = {}; streams = {}; pending = {}; calls = {}; serial = 0
+values = {}; sets = {}; streams = {}; pending = {}; calls = {}; keyCalls = {}; serial = 0
 redis = {}
 function redis.call(cmd, key, ...)
     local args = {...}; calls[cmd] = (calls[cmd] or 0) + 1
+    keyCalls[cmd .. ':' .. key] = (keyCalls[cmd .. ':' .. key] or 0) + 1
     if cmd == 'get' then return values[key] or false end
     if cmd == 'incrby' then
         values[key] = tostring((tonumber(values[key]) or 0) + tonumber(args[1])); return tonumber(values[key])
@@ -46,6 +47,10 @@ function redis.call(cmd, key, ...)
     if cmd == 'xdel' then
         if streams[key] and streams[key][args[1]] then streams[key][args[1]] = nil; return 1 end; return 0
     end
+    if cmd == 'xrange' then
+        if streams[key] and streams[key][args[1]] then return {{args[1], streams[key][args[1]]}} end
+        return {}
+    end
     error('unsupported command ' .. cmd)
 end
 function count(t) local n = 0; for _ in pairs(t or {}) do n = n + 1 end; return n end
@@ -59,7 +64,7 @@ function reservation()
     ARGV={'group','message','user','1','order','retry_exhausted'}
 end
 function replay(state)
-    streams.dead={message={reservationState=state}}; KEYS={'dead','target','stock','users'}
+    streams.dead={message={reservationState=state}}; KEYS={'dead','target','stock','users','recovery'}
     ARGV={'message','user','1','order',state}
 end
 """
@@ -67,7 +72,7 @@ end
 
 def execute(script, setup, checks):
     source = (ROOT / "src/main/resources" / script).read_text(encoding="utf-8")
-    chunk = HARNESS + setup + "\nlocal result = (function()\n" + source + "\nend)()\n" + checks
+    chunk = HARNESS + setup + "\nlocal script = function()\n" + source + "\nend\nlocal result = script()\n" + checks
     state = LUA.luaL_newstate()
     try:
         LUA.luaL_openlibs(state)
@@ -136,13 +141,15 @@ class LuaContracts(unittest.TestCase):
     def test_held_replay_never_double_reserves(self):
         execute("replay-dead-letter.lua", "values.stock='0'; sets.users={user=true}; replay('HELD')", """
             assert(result==1); assert(values.stock=='0'); assert(sets.users.user)
-            assert(not calls.incrby and not calls.sadd)
+            assert(not calls.incrby and not keyCalls['sadd:users'])
+            assert(sets.recovery.order)
             assert(count(streams.dead)==0 and count(streams.target)==1)
         """)
 
     def test_legacy_replay_reserves(self):
         execute("replay-dead-letter.lua", "values.stock='1'; replay(nil)", """
             assert(result==1); assert(values.stock=='0'); assert(sets.users.user)
+            assert(sets.recovery.order)
             assert(count(streams.dead)==0 and count(streams.target)==1)
         """)
 
@@ -157,6 +164,28 @@ class LuaContracts(unittest.TestCase):
     def test_deleted_held_entry_cannot_be_replayed_twice(self):
         execute("replay-dead-letter.lua", "values.stock='0'; sets.users={user=true}; replay('HELD'); streams.dead={}", """
             assert(result==0); assert(not calls.xadd and not calls.incrby and not calls.sadd)
+        """)
+
+    def test_failed_replay_quarantine_retains_recovery_marker(self):
+        quarantine = (ROOT / "src/main/resources/dead-letter.lua").read_text(encoding="utf-8")
+        setup = "local quarantine=function()\n" + quarantine + "\nend\n"
+        setup += "values.stock='0'; sets.users={user=true}; replay('HELD'); dbStock=0"
+        execute("replay-dead-letter.lua", setup, """
+            assert(result==1 and values.stock=='0' and dbStock==0 and sets.recovery.order)
+            -- Replay fails again: quarantine cannot clear its recovery marker.
+            pending.message=true; KEYS={'source','stock','users','dead','retry'}
+            ARGV={'group','message','user','1','order','retry_exhausted'}
+            assert(quarantine()==1); assert(sets.recovery.order)
+            assert(values.stock=='0' and sets.users.user and count(streams.dead)==1)
+        """)
+
+    def test_multiple_replays_track_each_order_until_commit(self):
+        execute("replay-dead-letter.lua", "values.stock='0'; sets.users={user=true}; replay('HELD')", """
+            assert(result==1 and sets.recovery.order)
+            streams.dead.message={}; ARGV[4]='second-order'; assert(script()==1)
+            assert(count(sets.recovery)==2)
+            redis.call('srem','recovery','order') -- only the first commit is confirmed
+            assert(count(sets.recovery)==1 and sets.recovery['second-order'])
         """)
 
 

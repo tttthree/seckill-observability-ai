@@ -1,5 +1,5 @@
 -- 原子删除死信并重投：HELD 保留原预占；LEGACY 重新预占。
--- KEYS: deadLetterStream 死信流, targetStream 目标流, stockKey 库存 key, orderedUsersKey 已下单用户 key
+-- KEYS: deadLetterStream, targetStream, stockKey, orderedUsersKey, recoveryPendingSet
 -- ARGV: deadLetterMessageId, userId, voucherId, orderId, reservationState（HELD/LEGACY，缺失视为历史）
 -- HELD 已预占；历史无标记条目仍需重新预占。未知状态 fail closed。
 local held = ARGV[5] == 'HELD'
@@ -14,6 +14,10 @@ if not held then
     end
 end
 
+-- 同一 Lua 内确认条目仍在，再先标记恢复；避免重复重放制造悬空 marker。
+local entry = redis.call('xrange', KEYS[1], ARGV[1], ARGV[1], 'COUNT', 1)
+if #entry == 0 then return 0 end
+redis.call('sadd', KEYS[5], ARGV[4])
 local removed = redis.call('xdel', KEYS[1], ARGV[1])
 if removed == 0 then
     return 0

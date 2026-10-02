@@ -14,6 +14,26 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class AdminActivityTest {
+    @Test void missingStockIsExplicitlyMissingInStats() {
+        AdminController controller = new AdminController();
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        ValueOperations<String, String> values = mock(ValueOperations.class);
+        ISeckillVoucherService vouchers = mock(ISeckillVoucherService.class);
+        com.hmdp.service.IVoucherOrderService orders = mock(com.hmdp.service.IVoucherOrderService.class);
+        com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper<com.hmdp.entity.VoucherOrder> query =
+                mock(com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper.class);
+        when(redis.opsForValue()).thenReturn(values);
+        when(vouchers.getById(1L)).thenReturn(new SeckillVoucher().setStock(0));
+        when(orders.lambdaQuery()).thenReturn(query);
+        when(query.eq(any(), any())).thenReturn(query);
+        when(query.count()).thenReturn(0);
+        ReflectionTestUtils.setField(controller, "stringRedisTemplate", redis);
+        ReflectionTestUtils.setField(controller, "seckillVoucherService", vouchers);
+        ReflectionTestUtils.setField(controller, "voucherOrderService", orders);
+        Map<String, Object> stats = controller.seckillStats(1L);
+        assertEquals("MISSING", stats.get("redis_stock"));
+        assertFalse(stats.containsKey("consistent"));
+    }
     @Test void stopAndResumeNeverOverwriteReservedStock() {
         AdminController controller = new AdminController();
         StringRedisTemplate redis = mock(StringRedisTemplate.class);

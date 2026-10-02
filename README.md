@@ -156,7 +156,7 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 
 ## V2-7 可靠性收口
 
-活动停启与库存分离，Lua 校验活动元数据及起止时间（边界含 begin/end）。新 DLQ 保留 reservation；事件关闭要求 DLQ 无该券记录且 Redis/DB 库存存在并一致。对账将 Redis stock missing 单独视为异常，并增加低频有界分页兜底。主消费者心跳不再由 Pending 线程刷新，停滞告警要求健康 UP 且 pending>0。
+活动停启与库存分离，Lua 校验活动元数据及起止时间（边界含 begin/end）。新 DLQ 保留 reservation；事件关闭要求 DLQ 无该券记录、recovery pending set 为空且 Redis/DB 库存存在并一致。对账将 Redis stock missing 单独视为异常，并增加低频有界分页兜底。主消费者心跳不再由 Pending 线程刷新，停滞告警要求健康 UP 且 pending>0。
 
 已有券必须通过管理员 resume 补齐 active/begin/end 元数据，缺失时 fail closed；resume 不覆盖 Redis stock，缺失库存需要人工核查。DB LocalDateTime 按 JVM 默认时区转换成 epoch millis，各应用实例应统一时区（例如 -Duser.timezone=Asia/Shanghai）。
 

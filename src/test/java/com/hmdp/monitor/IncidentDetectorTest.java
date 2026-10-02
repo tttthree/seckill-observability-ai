@@ -56,6 +56,8 @@ class IncidentDetectorTest {
     private org.springframework.data.redis.core.ValueOperations<String, String> values;
     @Mock
     private com.hmdp.service.ISeckillVoucherService vouchers;
+    @Mock
+    private org.springframework.data.redis.core.SetOperations<String, String> recovery;
 
     private IncidentDetector detector;
 
@@ -68,6 +70,8 @@ class IncidentDetectorTest {
         ReflectionTestUtils.setField(detector, "seckillProperties", new SeckillProperties());
         ReflectionTestUtils.setField(detector, "seckillVoucherService", vouchers);
         when(stringRedisTemplate.opsForValue()).thenReturn(values);
+        when(stringRedisTemplate.opsForSet()).thenReturn(recovery);
+        when(recovery.size(anyString())).thenReturn(0L);
         when(stringRedisTemplate.opsForStream()).thenReturn(streamOperations);
         when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
                 .thenReturn(Collections.emptyList());
@@ -247,6 +251,38 @@ class IncidentDetectorTest {
         when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
                 .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
         when(streamOperations.range(anyString(), any(), any())).thenReturn(Collections.emptyList());
+    }
+
+    @Test
+    void equalZeroStocksCannotResolveWhileReplayOrderIsPending() {
+        stubRecovery();
+        when(values.get("seckill:stock:9")).thenReturn("0");
+        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(0));
+        when(recovery.size("seckill:dead:recovery:9")).thenReturn(1L);
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+        when(recovery.size("seckill:dead:recovery:9")).thenReturn(0L);
+        detector.detect();
+        verify(incidentService).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    }
+
+    @Test
+    void oneRemainingOrderKeepsIncidentOpen() {
+        stubRecovery();
+        when(recovery.size("seckill:dead:recovery:9")).thenReturn(2L, 1L);
+        detector.detect();
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    }
+
+    @Test
+    void recoveryLookupFailureOrUnknownResultKeepsIncidentOpen() {
+        stubRecovery();
+        when(recovery.size(anyString())).thenReturn(null);
+        detector.detect();
+        when(recovery.size(anyString())).thenThrow(new RuntimeException("redis unavailable"));
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
     }
 
     @Test

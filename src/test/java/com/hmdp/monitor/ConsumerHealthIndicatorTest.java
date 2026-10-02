@@ -62,6 +62,8 @@ class ConsumerHealthIndicatorTest {
         assertTrue(expr.contains("seckill_consumer_health == 1"));
         assertTrue(expr.contains("seckill_consumer_pending_count > 0"));
         assertTrue(expr.contains("seckill_consumer_success_heartbeat_age_ms > 60000"));
+        assertTrue(expr.indexOf("seckill_consumer_success_heartbeat_age_ms > 60000")
+                < expr.indexOf("seckill_consumer_health == 1"));
         io.micrometer.core.instrument.simple.SimpleMeterRegistry registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         HealthMetricsExporter exporter = new HealthMetricsExporter();
         ReflectionTestUtils.setField(exporter, "meterRegistry", registry);

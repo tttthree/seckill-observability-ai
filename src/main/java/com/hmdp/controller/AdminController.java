@@ -63,7 +63,7 @@ public class AdminController {
 
         String redisStock = stringRedisTemplate.opsForValue()
                 .get(SECKILL_STOCK_KEY + voucherId);
-        stats.put("redis_stock", redisStock != null ? Integer.parseInt(redisStock) : 0);
+        stats.put("redis_stock", redisStock != null ? Integer.parseInt(redisStock) : "MISSING");
 
         var voucher = seckillVoucherService.getById(voucherId);
         stats.put("db_stock", voucher != null ? voucher.getStock() : "N/A");
@@ -187,7 +187,8 @@ public class AdminController {
                                     DEAD_LETTER_QUEUE,
                                     QUEUE_NAME,
                                     SECKILL_STOCK_KEY + voucherId,
-                                    SECKILL_ORDER_KEY + voucherId),
+                                    SECKILL_ORDER_KEY + voucherId,
+                                    DEAD_RECOVERY_KEY + voucherId),
                             record.getId().getValue(),
                             String.valueOf(userId),
                             String.valueOf(voucherId),

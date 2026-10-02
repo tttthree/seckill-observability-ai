@@ -117,7 +117,7 @@ HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通�
 
 ### 4.4 死信重放
 
-HELD：原子 XDEL 死信 → XADD 主流，不再扣库存或 SADD。历史无 reservationState 条目：保持原有库存/资格校验及重新预占逻辑。未知状态拒绝重放。重放不等于落库成功，恢复检测需进一步确认库存一致。
+HELD：原子 SADD recovery orderId → XDEL 死信 → XADD 主流，不再扣库存或向下单资格 Set 写入用户。历史无 reservationState 条目：保持原有库存/资格校验及重新预占逻辑。未知状态拒绝重放。重放不等于落库成功，恢复检测需进一步确认 recovery pending set 为空且库存一致。
 
 ## 5. 一致性边界
 
@@ -181,7 +181,7 @@ tb_incident → GET /admin/incidents
 | 类型 | 检测来源 | 恢复依据 | 级别 |
 |---|---|---|---|
 | `INVENTORY_MISMATCH` | `reconcile()` 两阶段确认后的持续偏差 | 同一轮对账发现 Redis 库存与 DB 库存重新一致 | HIGH |
-| `DEAD_LETTER` | 隔离脚本返回成功 | DLQ 无该券记录，Redis stock 与 DB 券存在且库存一致；读取失败保持 OPEN | HIGH |
+| `DEAD_LETTER` | 隔离脚本返回成功 | DLQ 无该券记录、recovery pending set 为空，Redis stock 与 DB 券存在且库存一致；读取失败保持 OPEN | HIGH |
 | `CONSUMER_UNHEALTHY` | `ConsumerHealthIndicator.health()` 的 DOWN / DEGRADED | 健康检查恢复 UP 且 `consumer_status=HEALTHY` | CRITICAL / MEDIUM |
 
 未接入：`commit_error`、`consume_error`、`reserve_error`、`stock_fail_db` 等只有累计计数、没有业务键与阈值语义的瞬时信号。按单次事件建 Incident 会产生噪声，本阶段不做。
@@ -554,7 +554,7 @@ tb_incident
 - Lua 参数 nowMillis 来自 Java 服务端。依次检查元数据、active、now<begin、now>end、库存、一人一单；时间边界包含 begin/end。返回码 0 成功 / 1 库存不足 / 2 重复 / 3 元数据缺失或非法 / 4 停止 / 5 未开始 / 6 已结束。
 - stats.activity：ACTIVE / STOPPED / NOT_STARTED / ENDED / METADATA_MISSING。旧券通过管理员 resume 初始化元数据；缺库存不自动恢复。
 - 新死信 HELD 始终保留预占；历史死信继续 LEGACY 重放。此策略主动牺牲故障期间可售库存，换取不因晚提交自动释放预占；取消和退库存流程不在本轮实现范围。
-- DEAD_LETTER 恢复要求 DLQ 无该券、Redis stock key 存在、DB 券/库存存在且两端库存一致。扫描超限、null 结果、Redis/DB 异常均不关闭事件。它是保守库存确认，不是逐单审计证明。
+- DEAD_LETTER 恢复要求 DLQ 无该券、seckill:dead:recovery:{id} Set 可确认为空、Redis stock key 存在、DB 券/库存存在且两端库存一致。扫描超限、null 结果、Redis/DB 异常均不关闭事件。它是保守库存确认，不是逐单审计证明。
 - dirty set 保持主路径；fallback-delay-ms 默认 1800000，fallback-limit 默认 100、硬限制 [1,1000]。DB 按 voucher_id 升序游标分页，标脏完成后推进游标，末页回到 0；仅发现并标脏，不改库存。大数据量下完整覆盖需要多轮。
 - Redis stock missing 保留 null 的 redis_stock/deviation 快照及明确描述，两阶段上报；不升级 IncidentContext v2-2.1。
 - 仅主消费循环刷新 main heartbeat。导出 seckill_consumer_pending_count；ConsumerStalled 要求 health==1 AND pending>0 AND success_age>60000。

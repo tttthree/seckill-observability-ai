@@ -146,6 +146,8 @@ public class IncidentDetector {
             Long voucherId = incident.getRelatedVoucherId();
             if (voucherId != null && !vouchersWithDeadLetters.contains(voucherId)) {
                 try {
+                    Long recovering = stringRedisTemplate.opsForSet().size(RedisConstants.DEAD_RECOVERY_KEY + voucherId);
+                    if (recovering == null || recovering != 0L) continue;
                     String stock = stringRedisTemplate.opsForValue().get(RedisConstants.SECKILL_STOCK_KEY + voucherId);
                     SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
                     if (stock != null && voucher != null && voucher.getStock() != null
