@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hmdp.config.SeckillProperties;
 import com.hmdp.constant.IncidentConstants;
 import com.hmdp.dto.IncidentReport;
@@ -274,7 +275,16 @@ public class IncidentServiceImpl extends ServiceImpl<IncidentMapper, Incident> i
             return null;
         }
         try {
-            return objectMapper.writeValueAsString(evidence);
+            // Snapshot keys explicitly collected as null must survive global NON_NULL inclusion.
+            ObjectNode snapshot = objectMapper.createObjectNode();
+            evidence.forEach((key, value) -> {
+                if (value == null) {
+                    snapshot.putNull(key);
+                } else {
+                    snapshot.set(key, objectMapper.valueToTree(value));
+                }
+            });
+            return objectMapper.writeValueAsString(snapshot);
         } catch (JsonProcessingException e) {
             log.warn("故障事件证据序列化失败: {}", e.getMessage());
             return null;

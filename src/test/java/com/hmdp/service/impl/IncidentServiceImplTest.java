@@ -6,6 +6,8 @@ import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.hmdp.config.SeckillProperties;
 import com.hmdp.dto.IncidentReport;
 import com.hmdp.entity.Incident;
@@ -100,6 +102,32 @@ class IncidentServiceImplTest {
         assertNull(created.getResolvedAt());
         assertTrue(created.getSnapshot().contains("\"deviation\":2"));
         verify(incidentMapper, never()).selectOne(any());
+    }
+
+    @Test
+    void shouldPersistExplicitNullSnapshotFieldsWithGlobalNonNullInclusion() throws Exception {
+        ObjectMapper globalMapper = new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        ReflectionTestUtils.setField(service, "objectMapper", globalMapper);
+        when(incidentMapper.update(any(), any())).thenReturn(0);
+        when(incidentMapper.insert(any(Incident.class))).thenReturn(1);
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("voucher_id", 13);
+        evidence.put("redis_stock", null);
+        evidence.put("db_stock", 0);
+        evidence.put("deviation", null);
+
+        service.report(inventoryMismatchReport().setEvidence(evidence));
+
+        ArgumentCaptor<Incident> persisted = ArgumentCaptor.forClass(Incident.class);
+        verify(incidentMapper).insert(persisted.capture());
+        JsonNode snapshot = globalMapper.readTree(persisted.getValue().getSnapshot());
+        assertTrue(snapshot.has("redis_stock"));
+        assertTrue(snapshot.get("redis_stock").isNull());
+        assertTrue(snapshot.has("deviation"));
+        assertTrue(snapshot.get("deviation").isNull());
+        assertEquals(0, snapshot.get("db_stock").intValue());
+        assertFalse(snapshot.has("uncollected"));
+        assertFalse(globalMapper.readTree(globalMapper.writeValueAsString(evidence)).has("redis_stock"));
     }
 
     /** Case 3：持续异常 → 只聚合更新，不新增行，且使用原子自增 */

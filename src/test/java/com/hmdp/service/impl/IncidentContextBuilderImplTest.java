@@ -446,6 +446,22 @@ class IncidentContextBuilderImplTest {
         assertEquals("LATEST_DETECTION", context.getIncident().getDetectedSnapshotScope());
     }
 
+    @Test
+    void shouldPreserveExplicitNullsInInventorySnapshotProjection() {
+        stubIncident(inventoryIncident().setSnapshot(
+                "{\"voucher_id\":13,\"redis_stock\":null,\"db_stock\":0,"
+                        + "\"deviation\":null,\"detected_at\":1790932584824}"), List.of());
+        stubRedisReads(true);
+
+        Map<String, Object> snapshot = builder.build(INCIDENT_ID).getIncident().getDetectedSnapshot();
+
+        assertTrue(snapshot.containsKey("redis_stock"));
+        assertNull(snapshot.get("redis_stock"));
+        assertTrue(snapshot.containsKey("deviation"));
+        assertNull(snapshot.get("deviation"));
+        assertEquals(0, snapshot.get("db_stock"));
+    }
+
     /** snapshot 解析失败只记 PARSE_ERROR，不影响其它字段 */
     @Test
     void shouldRecordParseErrorWithoutLosingOtherIncidentFields() {
