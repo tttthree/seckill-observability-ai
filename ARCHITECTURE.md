@@ -8,7 +8,7 @@
 - 秒杀券创建和库存初始化
 - Redis Lua 资格预占
 - Redis Stream 异步落库
-- Pending 认领、限次重试、死信和补偿
+- Pending 认领、限次重试、死信隔离和重放
 - Redis 与 MySQL 库存对账
 - 统一故障事件（Incident）层
 - Micrometer、Prometheus、Grafana 监控
@@ -100,7 +100,7 @@ HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通�
 
 ### 4.1 幂等结果
 
-数据库联合唯一索引触发的重复订单不会造成重复落单。消费者将其视为幂等结果并 ACK；数据库条件更新发现库存不足时仍保留 Pending，重试超限后统一执行原子补偿。
+数据库联合唯一索引触发的重复订单不会造成重复落单。消费者将其视为幂等结果并 ACK；数据库条件更新发现库存不足时仍保留 Pending，重试超限后隔离至 DLQ 并保留原预占。
 
 ### 4.2 瞬时异常
 
@@ -113,19 +113,11 @@ HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通�
 
 ### 4.3 重试超限
 
-`dead-letter.lua` 在 Redis 内原子完成：
-
-1. `XACK` 原消息。
-2. Redis 库存加一。
-3. 删除用户已下单资格。
-4. 写入死信 Stream。
-5. 删除重试计数。
-
-只有 `XACK` 成功时才执行补偿，避免一条消息被重复补偿。
+`dead-letter.lua` 在 Redis 内执行 XACK → 写入死信（reservationState=HELD）→ 删除重试计数。只有 XACK 成功才继续；不增加库存、不释放用户资格。DLQ 是 quarantine，不是业务取消，晚到的 DB 提交不会遇到自动回补的反向偏差。
 
 ### 4.4 死信重放
 
-`replay-dead-letter.lua` 先校验库存和资格，再原子删除死信、重新扣减库存、恢复资格并投递主 Stream。重放过程不会绕过一人一单和库存约束。
+HELD：原子 XDEL 死信 → XADD 主流，不再扣库存或 SADD。历史无 reservationState 条目：保持原有库存/资格校验及重新预占逻辑。未知状态拒绝重放。重放不等于落库成功，恢复检测需进一步确认库存一致。
 
 ## 5. 一致性边界
 
@@ -136,8 +128,8 @@ HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通�
 | 数据库重复落单 | `uk_user_voucher` 联合唯一索引 |
 | 数据库超卖 | `stock > 0` 条件更新 |
 | 消费进程异常 | Redis Stream PEL 与 `XCLAIM` |
-| 重复补偿 | 补偿脚本以 `XACK` 结果作为执行门槛 |
-| 长期库存偏差 | 脏券驱动的两阶段对账与人工告警 |
+| 重复隔离 | 隔离脚本以 `XACK` 结果作为执行门槛，始终保留预占 |
+| 长期库存偏差 | 脏券快速路径 + 低频有界分页兜底；missing 不等于 0，两阶段确认与人工告警 |
 
 对账不会自动覆盖 Redis 或 MySQL 库存。因为消费中的短暂差异是正常状态，直接覆盖可能放大错误；系统只在连续两轮不一致时记录 `reconcile_mismatch` 并告警。
 
@@ -189,7 +181,7 @@ tb_incident → GET /admin/incidents
 | 类型 | 检测来源 | 恢复依据 | 级别 |
 |---|---|---|---|
 | `INVENTORY_MISMATCH` | `reconcile()` 两阶段确认后的持续偏差 | 同一轮对账发现 Redis 库存与 DB 库存重新一致 | HIGH |
-| `DEAD_LETTER` | `routeToDeadLetter()` 中补偿脚本返回成功 | 死信 Stream 中已无该券记录（重放后的真实状态） | HIGH |
+| `DEAD_LETTER` | 隔离脚本返回成功 | DLQ 无该券记录，Redis stock 与 DB 券存在且库存一致；读取失败保持 OPEN | HIGH |
 | `CONSUMER_UNHEALTHY` | `ConsumerHealthIndicator.health()` 的 DOWN / DEGRADED | 健康检查恢复 UP 且 `consumer_status=HEALTHY` | CRITICAL / MEDIUM |
 
 未接入：`commit_error`、`consume_error`、`reserve_error`、`stock_fail_db` 等只有累计计数、没有业务键与阈值语义的瞬时信号。按单次事件建 Incident 会产生噪声，本阶段不做。
@@ -497,8 +489,8 @@ V2-5 将 `PROMPT_VERSION` 升为 `v2-5.1`（V2-6 起为 `v2-6.1`；Java 只要�
 
 ## 13. claim-level grounding（V2-6）
 
-V2-3 的证据回校验保证"证据本身真实"；V2-6 补上"结论必须挂到真实证据上"这一层，解决
-`root_cause` / `recommended_actions` 可能"比证据更强"的问题（例如把"当前两端一致且事件已 RESOLVED"
+V2-3 的证据回校验保证"证据本身真实"；V2-6 补上"结论必须挂到真实证据上"这一层，约束
+`root_cause` / `recommended_actions` 的引用关系，但不能形式化证明其措辞得到证据支持（例如把"当前两端一致且事件已 RESOLVED"
 写成"已被某流程修复"）。
 
 ```text
@@ -555,3 +547,17 @@ tb_incident
 ## 15. 关闭顺序
 
 应用关闭时先停止 Pending 定时认领，再停止主消费者拉取，等待执行中的任务结束，最后更新消费者健康状态，减少消息处理中断窗口。
+
+## 16. V2-7 Transaction & Recovery Hardening
+
+- 活动元数据：seckill:active:{id} / begin:{id} / end:{id}。创建券使用 MSET 写 stock 与元数据；stop 只写 active=0；resume 从 DB 时间恢复元数据并 active=1，绝不覆盖 stock。时间按 JVM 默认时区由 LocalDateTime 转 epoch millis；各实例必须统一时区。
+- Lua 参数 nowMillis 来自 Java 服务端。依次检查元数据、active、now<begin、now>end、库存、一人一单；时间边界包含 begin/end。返回码 0 成功 / 1 库存不足 / 2 重复 / 3 元数据缺失或非法 / 4 停止 / 5 未开始 / 6 已结束。
+- stats.activity：ACTIVE / STOPPED / NOT_STARTED / ENDED / METADATA_MISSING。旧券通过管理员 resume 初始化元数据；缺库存不自动恢复。
+- 新死信 HELD 始终保留预占；历史死信继续 LEGACY 重放。此策略主动牺牲故障期间可售库存，换取不因晚提交自动释放预占；取消和退库存流程不在本轮实现范围。
+- DEAD_LETTER 恢复要求 DLQ 无该券、Redis stock key 存在、DB 券/库存存在且两端库存一致。扫描超限、null 结果、Redis/DB 异常均不关闭事件。它是保守库存确认，不是逐单审计证明。
+- dirty set 保持主路径；fallback-delay-ms 默认 1800000，fallback-limit 默认 100、硬限制 [1,1000]。DB 按 voucher_id 升序游标分页，标脏完成后推进游标，末页回到 0；仅发现并标脏，不改库存。大数据量下完整覆盖需要多轮。
+- Redis stock missing 保留 null 的 redis_stock/deviation 快照及明确描述，两阶段上报；不升级 IncidentContext v2-2.1。
+- 仅主消费循环刷新 main heartbeat。导出 seckill_consumer_pending_count；ConsumerStalled 要求 health==1 AND pending>0 AND success_age>60000。
+- V2-6.1 重排与动作过滤使用同一 candidate_actions（先按 MAX_ACTIONS 截断）。claim citation 只保证结论引用了真实 accepted evidence，不构成自然语言语义蕴含的形式化证明。
+
+Dashboard、诊断持久化、操作历史、审计表不在本轮范围；AI client、Context 和 Python 对外契约保持不变。

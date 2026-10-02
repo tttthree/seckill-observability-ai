@@ -52,6 +52,10 @@ class IncidentDetectorTest {
     private StringRedisTemplate stringRedisTemplate;
     @Mock
     private StreamOperations<String, Object, Object> streamOperations;
+    @Mock
+    private org.springframework.data.redis.core.ValueOperations<String, String> values;
+    @Mock
+    private com.hmdp.service.ISeckillVoucherService vouchers;
 
     private IncidentDetector detector;
 
@@ -62,6 +66,8 @@ class IncidentDetectorTest {
         ReflectionTestUtils.setField(detector, "consumerHealthIndicator", consumerHealthIndicator);
         ReflectionTestUtils.setField(detector, "stringRedisTemplate", stringRedisTemplate);
         ReflectionTestUtils.setField(detector, "seckillProperties", new SeckillProperties());
+        ReflectionTestUtils.setField(detector, "seckillVoucherService", vouchers);
+        when(stringRedisTemplate.opsForValue()).thenReturn(values);
         when(stringRedisTemplate.opsForStream()).thenReturn(streamOperations);
         when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
                 .thenReturn(Collections.emptyList());
@@ -124,6 +130,8 @@ class IncidentDetectorTest {
     /** 死信流中已无该券记录 → 关闭对应故障事件（重放成功后的真实恢复信号） */
     @Test
     void shouldResolveDeadLetterIncidentWhenNoDeadLetterRemains() {
+        when(values.get("seckill:stock:9")).thenReturn("1");
+        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(1));
         stubHealthyConsumer();
         when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
                 .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
@@ -190,6 +198,65 @@ class IncidentDetectorTest {
         verify(incidentService, never()).report(any());
         verify(incidentService, never()).resolve(any(), anyString());
         verify(consumerHealthIndicator, never()).health();
+    }
+
+    @Test
+    void dlqGoneDoesNotResolveUntilStocksMatch() {
+        stubRecovery();
+        when(values.get("seckill:stock:9")).thenReturn("0");
+        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(1));
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    }
+
+    @Test
+    void missingRedisStockEvenWithZeroDbDoesNotResolve() {
+        stubRecovery();
+        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(0));
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    }
+
+    @Test
+    void missingDbDoesNotResolve() {
+        stubRecovery();
+        when(values.get("seckill:stock:9")).thenReturn("0");
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    }
+
+    @Test
+    void redisQueryFailureDoesNotResolve() {
+        stubRecovery();
+        when(values.get(anyString())).thenThrow(new RuntimeException("redis unavailable"));
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    }
+
+    @Test
+    void dbQueryFailureDoesNotResolve() {
+        stubRecovery();
+        when(values.get("seckill:stock:9")).thenReturn("0");
+        when(vouchers.getById(9L)).thenThrow(new RuntimeException("db unavailable"));
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    }
+
+    private void stubRecovery() {
+        stubHealthyConsumer();
+        when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
+                .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
+        when(streamOperations.range(anyString(), any(), any())).thenReturn(Collections.emptyList());
+    }
+
+    @Test
+    void nullOrMalformedDlqCannotProveRecovery() {
+        stubRecovery();
+        when(streamOperations.range(anyString(), any(), any())).thenReturn(null);
+        detector.detect();
+        when(streamOperations.range(anyString(), any(), any())).thenReturn(List.of(record("not-a-voucher")));
+        detector.detect();
+        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
     }
 
     private void stubHealthyConsumer() {

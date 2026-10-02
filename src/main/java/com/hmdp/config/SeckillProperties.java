@@ -52,6 +52,8 @@ public class SeckillProperties {
     @Data
     public static class Reconcile {
         private long fixedDelayMs = 300000;
+        private long fallbackDelayMs = 1800000;
+        private int fallbackLimit = 100;
     }
 
     @Data

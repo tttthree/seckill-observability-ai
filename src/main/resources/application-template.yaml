@@ -48,6 +48,8 @@ seckill:
     max: 3
   reconcile:
     fixed-delay-ms: 300000
+    fallback-delay-ms: 1800000
+    fallback-limit: 100
   load-model:
     concurrency: 2000
     stock: 400

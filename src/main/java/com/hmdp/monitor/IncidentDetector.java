@@ -5,11 +5,13 @@ import com.hmdp.constant.IncidentConstants;
 import com.hmdp.constant.RedisConstants;
 import com.hmdp.dto.IncidentReport;
 import com.hmdp.entity.Incident;
+import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.enums.IncidentSeverity;
 import com.hmdp.enums.IncidentSource;
 import com.hmdp.enums.IncidentStatus;
 import com.hmdp.enums.IncidentType;
 import com.hmdp.service.IncidentService;
+import com.hmdp.service.ISeckillVoucherService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.Status;
@@ -57,6 +59,8 @@ public class IncidentDetector {
 
     @Resource
     private SeckillProperties seckillProperties;
+    @Resource
+    private ISeckillVoucherService seckillVoucherService;
 
     @Scheduled(fixedDelayString = "#{@seckillProperties.incident.detectorIntervalMs}")
     public void detect() {
@@ -141,7 +145,16 @@ public class IncidentDetector {
             }
             Long voucherId = incident.getRelatedVoucherId();
             if (voucherId != null && !vouchersWithDeadLetters.contains(voucherId)) {
-                incidentService.resolve(IncidentType.DEAD_LETTER, incident.getBusinessKey());
+                try {
+                    String stock = stringRedisTemplate.opsForValue().get(RedisConstants.SECKILL_STOCK_KEY + voucherId);
+                    SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+                    if (stock != null && voucher != null && voucher.getStock() != null
+                            && Integer.parseInt(stock) == voucher.getStock()) {
+                        incidentService.resolve(IncidentType.DEAD_LETTER, incident.getBusinessKey());
+                    }
+                } catch (Exception e) {
+                    log.warn("死信业务恢复无法确认 voucherId={}", voucherId, e);
+                }
             }
         }
     }
@@ -158,7 +171,10 @@ public class IncidentDetector {
                             Range.unbounded(),
                             Limit.limit().count(IncidentConstants.DEAD_LETTER_SCAN_LIMIT));
 
-            if (records == null || records.isEmpty()) {
+            if (records == null) {
+                return null; // 无结果不能作为已确认清空的证据
+            }
+            if (records.isEmpty()) {
                 return Collections.emptySet();
             }
             if (records.size() >= IncidentConstants.DEAD_LETTER_SCAN_LIMIT) {
@@ -171,12 +187,13 @@ public class IncidentDetector {
             for (MapRecord<String, Object, Object> record : records) {
                 Object voucherId = record.getValue().get("voucherId");
                 if (voucherId == null) {
-                    continue;
+                    return null; // 无法判断这条记录属于哪张券，保守保持所有事件 OPEN
                 }
                 try {
                     voucherIds.add(Long.valueOf(String.valueOf(voucherId)));
                 } catch (NumberFormatException e) {
-                    log.warn("死信记录 voucherId 非法，已跳过 messageId={}", record.getId());
+                    log.warn("死信记录 voucherId 非法，本轮无法确认恢复 messageId={}", record.getId());
+                    return null;
                 }
             }
             return voucherIds;

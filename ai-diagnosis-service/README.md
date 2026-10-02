@@ -10,7 +10,7 @@ V2-5 起额外注入**人工评审的 Runbook 通用知识**（RAG，确定性�
   `recommended_actions(action,rationale)` / `insufficient_reason`），
   其余元数据（`observed`、`requires_human`、`evidence_validation`、`model`、时间、`error_code`）全部由本服务生成；
 - 模型侧失败一律返回 **HTTP 200 + `diagnosis_status=UNAVAILABLE`**，让 Java 调用方无需为 AI 可用性写异常分支；
-- 单次调用、**不做 retry/backoff**（retry / 限流 / 熔断在 Java 侧 V2-4 实现）；
+- 单次调用、**不做 retry/backoff**（Java V2-4 负责有界 retry / 限流，未实现熔断器）；
 - Runbook 只是**通用知识**，不是本次事故的事实；`evidence[].path` **只能**引用 IncidentContext；
 - V2-6：`root_cause` / 每条 action 必须用内部 citation 挂到同一次输出的 `evidence[].path` 上，
   无有效 citation 时 root_cause 降级为 `INSUFFICIENT_EVIDENCE`、action 被丢弃（citation 不对外输出）。
@@ -236,3 +236,5 @@ V2-3 的回校验保证"**证据本身真实**"；V2-6 再保证"**结论挂在�
 
 `tests/fixtures/` 中的样本由 V2-2 真实 smoke 捕获后**脱敏**生成
 （业务 id 改号、时间与 stream id 替换为合成值），保留结构与语义，不含本地运行细节。
+
+V2-6.1：evidence 重排与动作过滤都只使用先按 MAX_ACTIONS 截断的候选动作，超限动作不影响 accepted path 或 dropped_actions。claim citation 只保证结论引用了真实 accepted evidence，不构成自然语言语义蕴含的形式化证明。

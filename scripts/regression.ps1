@@ -104,7 +104,7 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 Assert-True ($orderStatus.data.status -eq "SUCCESS") "order was not committed within 6 seconds"
 
-Write-Host "[6/8] Exercising atomic dead-letter compensation and replay"
+Write-Host "[6/8] Exercising dead-letter quarantine and replay"
 $suffix = [Guid]::NewGuid().ToString("N")
 $sourceStream = "regression:source:$suffix"
 $deadStream = "regression:dead:$suffix"
@@ -133,9 +133,9 @@ try {
         "--eval", "src/main/resources/dead-letter.lua",
         $sourceStream, $stockKey, $orderedKey, $deadStream, $retryKey, ",",
         $group, $sourceId.Trim(), $testUserId, $testVoucherId, $testOrderId, "regression"))
-    Assert-True ($deadLetterResult.Trim() -eq "1") "dead-letter compensation script failed"
-    Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "1") "inventory was not compensated"
-    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "0") "eligibility was not compensated"
+    Assert-True ($deadLetterResult.Trim() -eq "1") "dead-letter quarantine script failed"
+    Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "0") "quarantine changed reserved inventory"
+    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "1") "quarantine released eligibility"
 
     $deadRecord = @(Invoke-Redis -Command @("XRANGE", $deadStream, "-", "+", "COUNT", "1"))
     Assert-True ($deadRecord.Count -gt 0) "dead-letter record was not created"
@@ -143,10 +143,10 @@ try {
     $replayResult = [string](Invoke-Redis -Command @(
         "--eval", "src/main/resources/replay-dead-letter.lua",
         $deadStream, $targetStream, $stockKey, $orderedKey, ",",
-        $deadId.Trim(), $testUserId, $testVoucherId, $testOrderId))
+        $deadId.Trim(), $testUserId, $testVoucherId, $testOrderId, "HELD"))
     Assert-True ($replayResult.Trim() -eq "1") "dead-letter replay script failed"
-    Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "0") "replay did not reserve inventory"
-    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "1") "replay did not restore eligibility"
+    Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "0") "HELD replay changed inventory"
+    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "1") "HELD replay changed eligibility"
 }
 finally {
     Invoke-Redis -Command @("DEL", $sourceStream, $deadStream, $targetStream, $stockKey, $orderedKey, $retryKey) | Out-Null
@@ -167,4 +167,4 @@ if ($RequireAiDiagnosis) {
     Assert-True ($diagnosis.primary_status -ne "UNKNOWN") "AI diagnosis did not complete successfully"
 }
 
-Write-Host "Regression passed: login, voucher creation, reservation, asynchronous commit, compensation, replay, reconciliation, metrics and diagnosis."
+Write-Host "Regression passed: login, voucher creation, reservation, asynchronous commit, quarantine, replay, reconciliation, metrics and diagnosis."

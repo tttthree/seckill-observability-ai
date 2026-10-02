@@ -9,11 +9,11 @@
   <img src="https://img.shields.io/badge/Monitor-Prometheus%20%2B%20Grafana-blue?logo=prometheus" alt="Prometheus and Grafana" />
 </p>
 
-面向高并发秒杀场景的可验证工程实现：Redis Lua 原子预占资格，Redis Stream 异步削峰，Pending/XCLAIM 恢复与死信补偿保障可靠落库，并以库存对账、Prometheus/Grafana 指标和 AI 辅助诊断形成闭环。
+面向高并发秒杀场景的可验证工程实现：Redis Lua 原子预占资格，Redis Stream 异步削峰，Pending/XCLAIM 恢复与死信隔离保障可靠落库，并以库存对账、Prometheus/Grafana 指标和 AI 辅助诊断形成闭环。
 
 ## 项目来源与个人改造边界
 
-本项目基于黑马点评教学项目进行二次重构。个人改造聚焦秒杀主链路：删除店铺、博客等非核心模块，补充 Redis Stream 异步下单的 Pending 恢复、死信补偿与重放、库存对账、Prometheus/Grafana 监控，以及基于运行指标的 AI 故障诊断。原有 `com.hmdp` 包名与 `hmdp` 数据库名作为兼容性边界保留，避免与业务能力无关的大范围迁移。
+本项目基于黑马点评教学项目进行二次重构。个人改造聚焦秒杀主链路：删除店铺、博客等非核心模块，补充 Redis Stream 异步下单的 Pending 恢复、死信隔离与重放、库存对账、Prometheus/Grafana 监控，以及基于运行指标的 AI 故障诊断。原有 `com.hmdp` 包名与 `hmdp` 数据库名作为兼容性边界保留，避免与业务能力无关的大范围迁移。
 
 ## 核心链路
 
@@ -28,7 +28,7 @@ Redis Stream 消费者组
    |
    +--> 正常消费 --> MySQL 条件扣减与订单落库 --> XACK
    |
-   +--> Pending/XCLAIM 重试 --> 死信补偿/重放
+   +--> Pending/XCLAIM 重试 --> 死信隔离/重放
                                       |
                                       v
 库存对账 --> Prometheus/Grafana --> AI 辅助诊断
@@ -40,7 +40,7 @@ Redis Stream 消费者组
 |---|---|
 | 原子资格预占 | Lua 将库存检查、一人一单、扣库存、资格记录和 Stream 投递合并为一次 Redis 原子操作 |
 | 可靠异步落库 | Redis Stream 消费者组批量拉取；Pending 处理器通过 `XCLAIM` 认领超时消息并限次重试 |
-| 原子死信补偿与重放 | Lua 同时完成 ACK、Redis 库存/资格回补和死信投递；重放时重新校验并预占资格 |
+| 原子死信隔离与重放 | 新死信保留库存/资格预占（HELD）；重放只重投主流，历史无标记死信仍重新预占 |
 | 数据库一致性兜底 | `UPDATE ... WHERE stock > 0` 防超卖，用户与优惠券联合唯一索引防重复订单 |
 | 两阶段库存对账 | 脏券驱动，连续两次确认偏差后告警，降低异步落库窗口造成的瞬时误报 |
 | 统一故障事件 | 对账偏差、死信、消费者不健康统一抽象为 Incident，按 `incidentType + businessKey` 聚合与恢复，为后续 AI 诊断提供可追溯上下文 |
@@ -117,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File scripts/regression.ps1 `
   -AdminToken $env:ADMIN_TOKEN
 ```
 
-脚本验证验证码登录、秒杀券创建、Lua 预占、重复请求拦截、Stream 异步落库、死信补偿与重放、库存对账、指标采集和 AI 诊断入口。配置有效的 `DEEPSEEK_API_KEY` 后可增加 `-RequireAiDiagnosis`。
+脚本验证验证码登录、秒杀券创建、Lua 预占、重复请求拦截、Stream 异步落库、死信隔离与重放、库存对账、指标采集和 AI 诊断入口。配置有效的 `DEEPSEEK_API_KEY` 后可增加 `-RequireAiDiagnosis`。
 
 JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存，线程在 10 秒 Ramp-up 内逐步启动。完整准备、执行命令与参数见 [benchmark/README.md](benchmark/README.md)。
 
@@ -147,9 +147,17 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 
 ## 目录与文档
 
-- [ARCHITECTURE.md](ARCHITECTURE.md)：秒杀、恢复、补偿、对账和指标模型设计
+- [ARCHITECTURE.md](ARCHITECTURE.md)：秒杀、恢复、隔离、对账和指标模型设计
 - [ai-diagnosis-service/README.md](ai-diagnosis-service/README.md)：V2-3 结构化 AI 诊断服务（接口、契约对齐、降级矩阵、运行方式）
 - [benchmark/README.md](benchmark/README.md)：JMeter 压测复现步骤
 - [benchmark/RESULTS.md](benchmark/RESULTS.md)：当前版本三轮原始压测结果
 - `src/main/resources/grafana-dashboard-seckill.json`：Grafana 仪表板
 - `src/main/resources/static/dashboard.html`：运维与 AI 辅助诊断页面
+
+## V2-7 可靠性收口
+
+活动停启与库存分离，Lua 校验活动元数据及起止时间（边界含 begin/end）。新 DLQ 保留 reservation；事件关闭要求 DLQ 无该券记录且 Redis/DB 库存存在并一致。对账将 Redis stock missing 单独视为异常，并增加低频有界分页兜底。主消费者心跳不再由 Pending 线程刷新，停滞告警要求健康 UP 且 pending>0。
+
+已有券必须通过管理员 resume 补齐 active/begin/end 元数据，缺失时 fail closed；resume 不覆盖 Redis stock，缺失库存需要人工核查。DB LocalDateTime 按 JVM 默认时区转换成 epoch millis，各应用实例应统一时区（例如 -Duser.timezone=Asia/Shanghai）。
+
+Dashboard 仍使用旧指标诊断接口；本轮不接 UI，不持久化诊断，不新增操作历史或审计表。具体验证及剩余风险见 [V2-7 验证记录](docs/V2-7-HARDENING.md)。

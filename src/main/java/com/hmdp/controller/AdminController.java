@@ -3,6 +3,7 @@ package com.hmdp.controller;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
+import com.hmdp.utils.SeckillActivity;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -54,6 +55,11 @@ public class AdminController {
     @GetMapping("/seckill/{voucherId}/stats")
     public Map<String, Object> seckillStats(@PathVariable Long voucherId) {
         Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("activity", SeckillActivity.status(
+                stringRedisTemplate.opsForValue().get(SECKILL_ACTIVE_KEY + voucherId),
+                stringRedisTemplate.opsForValue().get(SECKILL_BEGIN_KEY + voucherId),
+                stringRedisTemplate.opsForValue().get(SECKILL_END_KEY + voucherId),
+                System.currentTimeMillis()));
 
         String redisStock = stringRedisTemplate.opsForValue()
                 .get(SECKILL_STOCK_KEY + voucherId);
@@ -105,25 +111,25 @@ public class AdminController {
     // ==================== 紧急控制 ====================
 
     /**
-     * 紧急停止秒杀（Redis 库存置 0，所有新请求被 Lua 拒绝）
+     * 紧急停止活动；保留库存和在途预占。
      * POST /admin/seckill/{voucherId}/stop
      */
     @PostMapping("/seckill/{voucherId}/stop")
     public Map<String, Object> stopSeckill(@PathVariable Long voucherId) {
         stringRedisTemplate.opsForValue()
-                .set(SECKILL_STOCK_KEY + voucherId, "0");
+                .set(SECKILL_ACTIVE_KEY + voucherId, "0");
 
         log.warn("🚨 秒杀已紧急停止 voucherId={}", voucherId);
         return Map.of(
                 "success", true,
                 "action", "stop",
                 "voucher_id", voucherId,
-                "message", "Redis 库存已置 0，所有新请求将被拒绝"
+                "message", "活动已停止，库存和在途预占保持不变"
         );
     }
 
     /**
-     * 恢复秒杀（重新设置 Redis 库存 = DB 库存）
+     * 恢复活动元数据；不得覆盖 Redis 库存。
      * POST /admin/seckill/{voucherId}/resume
      */
     @PostMapping("/seckill/{voucherId}/resume")
@@ -132,15 +138,21 @@ public class AdminController {
         if (voucher == null || voucher.getStock() == null) {
             return Map.of("success", false, "message", "券不存在或已失效");
         }
-        stringRedisTemplate.opsForValue()
-                .set(SECKILL_STOCK_KEY + voucherId, String.valueOf(voucher.getStock()));
+        if (voucher.getBeginTime() == null || voucher.getEndTime() == null
+                || voucher.getBeginTime().isAfter(voucher.getEndTime())) {
+            return Map.of("success", false, "message", "活动起止时间缺失或非法");
+        }
+        Map<String, String> metadata = SeckillActivity.metadata(
+                voucherId, voucher.getBeginTime(), voucher.getEndTime());
+        stringRedisTemplate.opsForValue().multiSet(metadata);
 
         log.info("✅ 秒杀已恢复 voucherId={}, stock={}", voucherId, voucher.getStock());
         return Map.of(
                 "success", true,
                 "action", "resume",
                 "voucher_id", voucherId,
-                "stock", voucher.getStock()
+                "activity", SeckillActivity.status("1", metadata.get(SECKILL_BEGIN_KEY + voucherId),
+                        metadata.get(SECKILL_END_KEY + voucherId), System.currentTimeMillis())
         );
     }
 
@@ -179,7 +191,8 @@ public class AdminController {
                             record.getId().getValue(),
                             String.valueOf(userId),
                             String.valueOf(voucherId),
-                            String.valueOf(orderId));
+                            String.valueOf(orderId),
+                            String.valueOf(value.getOrDefault("reservationState", "LEGACY")));
                     if (Long.valueOf(1L).equals(replayed)) {
                         count++;
                     }

@@ -10,6 +10,9 @@ public class RedisConstants {
     public static final Long LOGIN_USER_TTL = 30L;
 
     public static final String SECKILL_STOCK_KEY = "seckill:stock:";
+    public static final String SECKILL_ACTIVE_KEY = "seckill:active:";
+    public static final String SECKILL_BEGIN_KEY = "seckill:begin:";
+    public static final String SECKILL_END_KEY = "seckill:end:";
     public static final String SECKILL_ORDER_KEY = "seckill:order:";
     public static final String STREAM_ORDERS_KEY = "stream.orders";
     public static final String STREAM_ORDERS_DEAD_KEY = "stream.orders.dead";

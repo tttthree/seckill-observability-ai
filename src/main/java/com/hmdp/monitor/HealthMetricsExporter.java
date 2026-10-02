@@ -35,6 +35,10 @@ public class HealthMetricsExporter {
 
     @PostConstruct
     public void register() {
+        Gauge.builder("seckill_consumer_pending_count", consumerHealthIndicator, h -> {
+                    Object count = h.health().getDetails().get("pending_count");
+                    return count instanceof Number ? ((Number) count).doubleValue() : -1.0;
+                }).description("已投递未 ACK 消息数；不可用时 -1").register(meterRegistry);
         Gauge.builder("seckill_consumer_health", consumerHealthIndicator, h -> {
                     Health health = h.health();
                     return Status.UP.equals(health.getStatus()) ? 1 : 0;

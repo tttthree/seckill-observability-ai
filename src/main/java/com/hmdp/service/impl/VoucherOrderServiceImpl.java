@@ -155,7 +155,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     seckillProperties.getPendingHandler().getBatchSize());
         }
 
-        healthIndicator.markAlive();
     }
 
     /**
@@ -209,7 +208,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Long result = stringRedisTemplate.execute(
                 SECKILL_SCRIPT,
                 Collections.emptyList(),
-                String.valueOf(voucherId), String.valueOf(userId), String.valueOf(orderId)
+                String.valueOf(voucherId), String.valueOf(userId), String.valueOf(orderId),
+                String.valueOf(System.currentTimeMillis())
         );
 
         if (result == null) {
@@ -222,9 +222,17 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             if (r == 1) {
                 incrMetric(M_STOCK_FAIL_REDIS);
                 return Result.fail("库存不足");
-            } else {
+            } else if (r == 2) {
                 incrMetric(M_DUPLICATE_REQUEST);
                 return Result.fail("不能重复下单");
+            } else {
+                switch (r) {
+                    case 3: return Result.fail("活动元数据缺失或非法，请联系管理员");
+                    case 4: return Result.fail("活动已停止");
+                    case 5: return Result.fail("活动尚未开始");
+                    case 6: return Result.fail("活动已结束");
+                    default: return Result.fail("活动状态异常");
+                }
             }
         }
 
@@ -330,7 +338,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             if (shuttingDown) return;
 
             try {
-                healthIndicator.markAlive();
                 int batchSize = seckillProperties.getPendingHandler().getBatchSize();
 
                 PendingMessages pendingMessages = stringRedisTemplate.opsForStream()
@@ -379,7 +386,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                         handleVoucherOrder(voucherOrder);
                     } catch (Exception e) {
                         log.error("PendingHandler 订单处理失败，待重试 messageId={}", record.getId(), e);
-                        // 超过重试次数 → 移入死信队列（含库存补偿）
+                        // 超过重试次数 → 死信隔离，保留 reservation。
                         if (exceedRetry(record.getId().getValue())) {
                             routeToDeadLetter(record);
                         }
@@ -461,7 +468,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     e);
 
         } catch (StockException e) {
-            // Redis 已预占但 DB 暂时无法扣减：保留 Pending 重试，超限后统一原子补偿。
+            // Redis 已预占但 DB 暂时无法扣减：保留 Pending 重试，超限后隔离且保留预占。
             incrMetric(M_STOCK_FAIL_DB);
             log.error("库存扣减失败 voucherId={}", voucherOrder.getVoucherId(), e);
             throw e;
@@ -496,7 +503,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     /**
-     * 死信路由：库存补偿 + 移入死信队列 + ACK 原消息
+     * 死信隔离：保留 reservation + 移入死信队列 + ACK 原消息
      * <p>
      * 由 PendingHandlerTask 调用，保证死信处理逻辑一致
      */
@@ -527,7 +534,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 String.valueOf(orderId),
                 "retry_exhausted");
         if (Long.valueOf(1L).equals(routed)) {
-            log.info("死信路由完成并回滚 Redis 预占 voucherId={}, orderId={}", vid, orderId);
+            log.info("死信隔离完成，保留 Redis 预占 voucherId={}, orderId={}", vid, orderId);
             // 重试超限是真实故障：上报为统一故障事件（按 voucherId 聚合）
             reportDeadLetter(vid, userId, orderId, messageId);
         } else {
@@ -552,12 +559,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      * <p>
      * 同一券持续偏差时由 IncidentService 聚合到已存在的 OPEN 事件（occurrence_count + 1），不重复建单。
      */
-    private void reportInventoryMismatch(Long voucherId, int redisStock, int dbStock) {
+    private void reportInventoryMismatch(Long voucherId, Integer redisStock, int dbStock) {
         Map<String, Object> evidence = new LinkedHashMap<>();
         evidence.put("voucher_id", voucherId);
         evidence.put("redis_stock", redisStock);
         evidence.put("db_stock", dbStock);
-        evidence.put("deviation", dbStock - redisStock);
+        evidence.put("deviation", redisStock == null ? null : dbStock - redisStock);
         evidence.put("detected_at", System.currentTimeMillis());
 
         incidentService.report(new IncidentReport()
@@ -567,7 +574,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .setBusinessKey(IncidentConstants.BUSINESS_KEY_VOUCHER_PREFIX + voucherId)
                 .setRelatedVoucherId(voucherId)
                 .setTitle("Redis 与 MySQL 库存持续不一致（voucherId=" + voucherId + "）")
-                .setDescription(String.format(
+                .setDescription(redisStock == null
+                        ? "连续两轮确认 Redis stock missing；数据库库存=" + dbStock + "，需人工介入，不自动补库存"
+                        : String.format(
                         "连续两轮对账确认偏差：redisStock=%d, dbStock=%d, deviation=%d；"
                                 + "系统不会自动覆盖库存，需人工介入",
                         redisStock, dbStock, dbStock - redisStock))
@@ -600,7 +609,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .setRelatedVoucherId(relatedVoucherId)
                 .setTitle("订单消息重试超限进入死信队列（voucherId=" + voucherId + "）")
                 .setDescription(String.format(
-                        "消息 %s 超过最大重试次数 %d，已回补 Redis 库存、释放下单资格并写入死信队列，等待人工重放",
+                        "消息 %s 超过最大重试次数 %d，已隔离至死信队列，Redis 预占和下单资格仍保留（HELD），等待人工重放",
                         messageId, maxRetry))
                 .setEvidence(evidence));
     }
@@ -622,6 +631,28 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     /**
      * 库存对账：对比 Redis 库存 vs DB 库存（脏券驱动，两阶段告警）
      */
+    private long fallbackCursor = 0;
+
+    /** 低频有界分页兜底；每轮只发现并标脏，绝不写库存。 */
+    @Scheduled(fixedDelayString = "#{@seckillProperties.reconcile.fallbackDelayMs}",
+            initialDelayString = "#{@seckillProperties.reconcile.fallbackDelayMs}")
+    public synchronized void fallbackReconcile() {
+        try {
+            int limit = Math.max(1, Math.min(1000, seckillProperties.getReconcile().getFallbackLimit()));
+            List<SeckillVoucher> vouchers = seckillVoucherService.list(
+                    com.baomidou.mybatisplus.core.toolkit.Wrappers.<SeckillVoucher>lambdaQuery()
+                            .gt(SeckillVoucher::getVoucherId, fallbackCursor)
+                            .orderByAsc(SeckillVoucher::getVoucherId).last("LIMIT " + limit));
+            for (SeckillVoucher voucher : vouchers) {
+                stringRedisTemplate.opsForSet().add(RECONCILE_KEY, String.valueOf(voucher.getVoucherId()));
+            }
+            // 只有完整标脏成功后才推进游标；失败下一轮重扫同一页。
+            fallbackCursor = vouchers.size() < limit ? 0 : vouchers.get(vouchers.size() - 1).getVoucherId();
+        } catch (Exception e) {
+            log.warn("兜底对账扫描失败，保留游标等待下轮", e);
+        }
+    }
+
     @Scheduled(fixedDelayString = "#{@seckillProperties.reconcile.fixedDelayMs}")
     public void reconcile() {
         try {
@@ -635,13 +666,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 Long voucherId = Long.valueOf(idStr);
                 String redisKey = SECKILL_STOCK_KEY + voucherId;
                 String redisStockStr = stringRedisTemplate.opsForValue().get(redisKey);
-                int redisStock = redisStockStr == null ? 0 : Integer.parseInt(redisStockStr);
+                Integer redisStock = redisStockStr == null ? null : Integer.valueOf(redisStockStr);
                 SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
                 if (voucher == null || voucher.getStock() == null) {
                     continue;
                 }
                 int dbStock = voucher.getStock();
-                if (redisStock == dbStock) {
+                if (redisStock != null && redisStock == dbStock) {
                     stringRedisTemplate.opsForSet()
                             .remove(RECONCILE_KEY, idStr);
                     stringRedisTemplate.delete(RECONCILE_MISMATCH_PREFIX + voucherId);

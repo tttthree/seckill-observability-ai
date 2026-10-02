@@ -10,12 +10,23 @@ local voucherId = ARGV[1]
 local userId = ARGV[2]
 --1.2.订单id
 local orderId = ARGV[3]
+local now = tonumber(ARGV[4])
 
 --2.数据key
 --2.1.库存key    ..  ->  字符串拼接
 local stockKey = 'seckill:stock:' .. voucherId
 --2.2.订单key
 local orderKey = 'seckill:order:' .. voucherId
+
+local active = redis.call('get', 'seckill:active:' .. voucherId)
+local beginTime = tonumber(redis.call('get', 'seckill:begin:' .. voucherId))
+local endTime = tonumber(redis.call('get', 'seckill:end:' .. voucherId))
+if active == false or beginTime == nil or endTime == nil or now == nil or beginTime > endTime then
+    return 3 -- metadata missing/invalid: fail closed
+end
+if active ~= '1' then return 4 end
+if now < beginTime then return 5 end
+if now > endTime then return 6 end
 
 --3.脚本业务
 --3.1.判断库存是否充足 GET stockKey  Redis 的 get 命令返回的是字符串类型,需要转成number才能跟0比较大小
