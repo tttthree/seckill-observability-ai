@@ -57,17 +57,16 @@ class LLMEvidence(BaseModel):
 
 
 class LLMAction(BaseModel):
-    """模型给出的建议：只允许 action + rationale（+ V2-6 内部 citation）。
+    """模型给出的建议：只允许 action + rationale。
 
-    `evidence_paths` 只能引用**同一次输出中 evidence[].path**，仅用于服务端 grounding 校验，
-    不会进入 DiagnosisResult。
+    `requires_human` 由服务强制为 True，模型无法要求自动执行。
+    未知字段（如历史版本的 citation 字段）一律丢弃，不影响服务。
     """
 
     model_config = ConfigDict(extra="ignore")
 
     action: str
     rationale: str
-    evidence_paths: List[str] = Field(default_factory=list)
 
 
 class LLMDiagnosis(BaseModel):
@@ -78,15 +77,14 @@ class LLMDiagnosis(BaseModel):
     随后由服务做语义校验（见 diagnosis_service）。这与输入契约的严格性要求并不冲突
     ——输入契约必须严，模型输出需要宽容 + 后验校验。
 
-    V2-6：`root_cause_evidence_paths` 是 root_cause 的内部 citation（claim-level grounding），
-    只能引用同一次输出里的 evidence[].path，仅用于服务端校验与日志，不对外输出。
+    模型只输出语义字段：诊断状态、根因、证据引用（path + note）、人工建议、证据不足原因。
+    `observed`、`requires_human`、时间戳等元数据由服务生成，模型无法提供。
     """
 
     model_config = ConfigDict(extra="ignore")
 
     diagnosis_status: Literal["DIAGNOSED", "INSUFFICIENT_EVIDENCE"]
     root_cause: Optional[str] = None
-    root_cause_evidence_paths: List[str] = Field(default_factory=list)
     evidence: List[LLMEvidence] = Field(default_factory=list)
     recommended_actions: List[LLMAction] = Field(default_factory=list)
     insufficient_reason: Optional[str] = None

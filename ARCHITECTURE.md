@@ -451,51 +451,20 @@ Python V2-5 DiagnosisService
 ### 12.4 与 Java 的关系
 
 Java 侧**零改动**：不感知 Runbook 的存在，仍按 V2-4.1 校验响应（相关性 + 证据不变量 + 状态语义）。
-`PROMPT_VERSION` 当前为 `v3.0`（Java 只要求该字段非空）。
+`PROMPT_VERSION` 当前为 `v3.1`（Java 只要求该字段非空）。
 检索结果（命中 id 与分数）只写入 Python 日志，供人工审计。
 
-## 13. claim-level grounding（V2-6）
+### 12.5 防幻觉（六条，全部可确定性判定）
 
-V2-3 的证据回校验保证"证据本身真实"；V2-6 补上"结论必须挂到真实证据上"这一层，约束
-`root_cause` / `recommended_actions` 的引用关系，但不能形式化证明其措辞得到证据支持（例如把"当前两端一致且事件已 RESOLVED"
-写成"已被某流程修复"）。
+1. `IncidentContext` 只包含服务端真实采集到的数据（缺失即 `null` + `unavailable_sources`）；
+2. 模型必须为每条结论输出 `evidence[].path`；
+3. 服务端用该 path 回溯本次 Context（语法：`.属性` + `[下标]`）；
+4. path 不存在 / 语法非法 / 重复 → 丢弃并计入 `evidence_validation.dropped`；
+5. 通过校验的 evidence，其 `observed` 一律由服务端用 Context 真实值覆盖（模型给的值不被信任）；
+6. `DIAGNOSED` 至少需要一条 accepted evidence，且 `root_cause` 非空；否则降级 `INSUFFICIENT_EVIDENCE`。
 
-```text
-模型输出（同一次调用）
-  ├─ evidence[]                       ← 唯一证据池
-  ├─ root_cause + root_cause_evidence_paths      ← claim citation（只引用上面的 path）
-  └─ recommended_actions[] + evidence_paths      ← action citation
-        ▼
-  稳定重排序 evidence（root citation → action citation → 其余；不增删条目）
-        ▼
-  evidence_validator.validate_evidence()          ← 仍是 path / observed 唯一权威
-        ▼
-  以最终 accepted evidence.path 集合校验 citation
-        ├─ root_cause 无有效 citation → INSUFFICIENT_EVIDENCE（正规化）
-        └─ 单条 action 无有效 citation → 只丢弃该 action
-```
-
-### 13.1 冻结规则
-
-- citation **不是第二套 evidence**：`root_cause_evidence_paths` / action `evidence_paths` 只能引用同一次输出里
-  已经存在的 `evidence[].path`；不要求模型之外的任何解析，**不新增第二套 validator**；
-- `services/evidence_validator.py` 仍是 path 合法性 / `observed` 回填的唯一来源；
-- 调用 `validate_evidence()` 之前只允许对 `parsed.evidence` 做**稳定重排序**（不新增、不删除、不去重）：
-  root citation 对应条目优先，其次 action citation，最后是未被引用的条目（分桶内保持原相对顺序）；
-- 因此 `submitted / accepted / dropped / over_limit` 四统计语义与 V2-3.3 **完全一致**
-  （真实 `15/10/0/5` 场景仍为 `15/10/0/5`），只有 `accepted` 的**具体 path 集合**可能因优先级变化；
-- `DIAGNOSED` 必须至少有 **1 条** root citation 最终 accepted；为空或全无效 → 降级 `INSUFFICIENT_EVIDENCE`；
-  部分有效 → 保留 `DIAGNOSED`，只记录 invalid 计数；
-- 单条 action 至少有 1 条 citation 最终 accepted 才保留，否则**只丢弃该条**（不降级整份诊断）；
-- citations 仅内部使用：不进入 `DiagnosisResult`、不进入 Java、不进入 `evidence_validation` 统计、不落库；
-- 日志只记录计数（`root_cited` / `root_accepted` / `invalid` / `dropped_actions` / `downgraded`），
-  不打印 claim 正文、Context 或 Runbook 正文；
-- 仍然只有**一次** DeepSeek 调用；无 verifier LLM、无 NLI、无新框架。
-
-### 13.2 与 Java 的关系
-
-Java **零改动**：`DiagnosisResult` 字段集合不变，V2-4.1 的相关性/非空/V2-3.3 不变量/状态语义校验全部照旧。
-`PROMPT_VERSION` 为 `v3.0`（Java 只校验非空）。
+**明确边界**：本机制证明的是"模型引用的数据真实存在"，**不是**"自然语言根因被形式化证明"。
+因此不引入 NLI、语义蕴含判定、第二次 verifier 调用或 keyword matching。
 
 ## 14. 数据库
 
@@ -525,6 +494,5 @@ tb_incident
 - dirty set 保持主路径；fallback-delay-ms 默认 1800000，fallback-limit 默认 100、硬限制 [1,1000]。DB 按 voucher_id 升序游标分页，标脏完成后推进游标，末页回到 0；仅发现并标脏，不改库存。大数据量下完整覆盖需要多轮。
 - Redis stock missing 保留 null 的 redis_stock/deviation 快照及明确描述，两阶段上报。
 - 仅主消费循环刷新 main heartbeat。导出 seckill_consumer_pending_count；ConsumerStalled 要求 health==1 AND pending>0 AND success_age>60000。
-- V2-6.1 重排与动作过滤使用同一 candidate_actions（先按 MAX_ACTIONS 截断）。claim citation 只保证结论引用了真实 accepted evidence，不构成自然语言语义蕴含的形式化证明。
 
 Dashboard、诊断持久化、操作历史、审计表不在本轮范围；AI client、Context 和 Python 对外契约保持不变。

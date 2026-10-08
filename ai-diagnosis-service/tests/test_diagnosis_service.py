@@ -26,10 +26,6 @@ def make_service(payload=None, error=None, raw_text=None, **overrides):
 GOOD_LLM = {
     "diagnosis_status": "DIAGNOSED",
     "root_cause": "券维度 Redis 库存采集中断，构建时刻的库存状态与检测证据不一致。",
-    "root_cause_evidence_paths": [
-        "incident.detected_snapshot.redis_stock",
-        "redis.stock.value",
-    ],
     "evidence": [
         {"path": "incident.detected_snapshot.redis_stock", "note": "最近一次检测证据显示 Redis 库存为 0"},
         {"path": "redis.stock.value", "note": "构建时刻 Redis 库存已恢复为 1"},
@@ -39,7 +35,6 @@ GOOD_LLM = {
         {
             "action": "人工核对券 7001 的 Redis 与 MySQL 库存",
             "rationale": "系统不会自动覆盖库存",
-            "evidence_paths": ["database.stock"],
         }
     ],
     "insufficient_reason": None,
@@ -56,7 +51,7 @@ def test_diagnosed_result_metadata_is_generated_by_service(context):
     assert result.context_version == "v3.0"
     assert result.incident_id == context.incident.incident_id
     assert result.model == settings.deepseek_model
-    assert result.prompt_version == "v3.0"
+    assert result.prompt_version == "v3.1"
     assert result.error_code is None
     assert result.diagnosed_at.tzinfo is not None
     assert result.elapsed_ms >= 0
@@ -76,14 +71,12 @@ def test_action_requires_human_is_forced_by_service(context):
     payload = {
         "diagnosis_status": "DIAGNOSED",
         "root_cause": "x",
-        "root_cause_evidence_paths": ["incident.status"],
         "evidence": [{"path": "incident.status", "note": "n"}],
         "recommended_actions": [
             {
                 "action": "自动回滚库存",
                 "rationale": "看起来更快",
                 "requires_human": False,
-                "evidence_paths": ["incident.status"],
             }
         ],
         "insufficient_reason": None,
@@ -98,7 +91,7 @@ def test_action_requires_human_is_forced_by_service(context):
 def test_actions_are_capped(context):
     payload = dict(GOOD_LLM)
     payload["recommended_actions"] = [
-        {"action": f"a{i}", "rationale": "r", "evidence_paths": ["redis.stock.value"]}
+        {"action": f"a{i}", "rationale": "r"}
         for i in range(9)
     ]
     service, _, settings = make_service(payload=payload)
@@ -137,6 +130,101 @@ def test_diagnosed_without_root_cause_is_downgraded(context):
 
     assert result.diagnosis_status == "INSUFFICIENT_EVIDENCE"
     assert result.insufficient_reason
+    assert result.root_cause is None
+
+
+def test_diagnosed_with_valid_evidence_and_action_keeps_action(context):
+    """D：合法 evidence + action → 保留该 action 且 requires_human=true（不再要求 action citation）。"""
+    payload = {
+        "diagnosis_status": "DIAGNOSED",
+        "root_cause": "两端库存存在偏差",
+        "evidence": [{"path": "database.stock", "note": "数据库库存"}],
+        "recommended_actions": [
+            {"action": "人工核对库存", "rationale": "系统不自动覆盖", "evidence_paths": ["ignored"]},
+        ],
+        "insufficient_reason": None,
+    }
+    service, _, _ = make_service(payload=payload)
+
+    result = service.diagnose(context)
+
+    assert result.diagnosis_status == "DIAGNOSED"
+    assert [a.action for a in result.recommended_actions] == ["人工核对库存"]
+    assert result.recommended_actions[0].requires_human is True
+    # 未知的历史 citation 字段被 extra="ignore" 丢弃，不影响服务
+    assert not hasattr(result.recommended_actions[0], "evidence_paths")
+
+
+def test_action_without_any_citation_is_no_longer_dropped(context):
+    """D 反向：模型完全不输出 citation 时，action 仍必须保留（旧行为会因无 citation 丢弃）。"""
+    payload = {
+        "diagnosis_status": "DIAGNOSED",
+        "root_cause": "两端库存存在偏差",
+        "evidence": [{"path": "database.stock", "note": "数据库库存"}],
+        "recommended_actions": [
+            {"action": "人工核对库存", "rationale": "系统不自动覆盖"},
+            {"action": "复核对账记录", "rationale": "确认无残留偏差"},
+        ],
+        "insufficient_reason": None,
+    }
+    service, _, _ = make_service(payload=payload)
+
+    result = service.diagnose(context)
+
+    assert [a.action for a in result.recommended_actions] == ["人工核对库存", "复核对账记录"]
+
+
+def test_insufficient_evidence_normalization_keeps_accepted_evidence(context):
+    """E：模型主动判证据不足 → root_cause=null、actions=[]，但已 accepted 的 evidence 保留。"""
+    payload = {
+        "diagnosis_status": "INSUFFICIENT_EVIDENCE",
+        "root_cause": "不该出现",
+        "evidence": [
+            {"path": "incident.status", "note": "事件仍开启"},
+            {"path": "redis.stock.value", "note": "Redis 库存"},
+        ],
+        "recommended_actions": [{"action": "不该出现", "rationale": "r"}],
+        "insufficient_reason": "缺少同时刻两端库存证据",
+    }
+    service, _, _ = make_service(payload=payload)
+
+    result = service.diagnose(context)
+
+    assert result.diagnosis_status == "INSUFFICIENT_EVIDENCE"
+    assert result.root_cause is None
+    assert result.recommended_actions == []
+    assert result.error_code is None
+    # 已通过回校验的证据保留
+    assert [e.path for e in result.evidence] == ["incident.status", "redis.stock.value"]
+    assert result.evidence_validation.accepted == 2
+    assert_submitted_invariant(result.evidence_validation)
+
+
+def test_evidence_keeps_model_order_without_citation_reorder(context):
+    """F：evidence 按模型原始顺序进入 validator，不再按 citation 优先级重排。"""
+    # 第 3 条被"引用"（旧实现会把它提到最前），新实现必须保持原顺序
+    payload = {
+        "diagnosis_status": "DIAGNOSED",
+        "root_cause": "两端库存存在偏差",
+        "root_cause_evidence_paths": ["database.stock"],
+        "evidence": [
+            {"path": "incident.status", "note": "1"},
+            {"path": "redis.stock.value", "note": "2"},
+            {"path": "database.stock", "note": "3"},
+        ],
+        "recommended_actions": [],
+        "insufficient_reason": None,
+    }
+    service, _, _ = make_service(payload=payload)
+
+    result = service.diagnose(context)
+
+    assert result.diagnosis_status == "DIAGNOSED"
+    assert [e.path for e in result.evidence] == [
+        "incident.status",
+        "redis.stock.value",
+        "database.stock",
+    ]
 
 
 def test_insufficient_evidence_status_is_kept(context):

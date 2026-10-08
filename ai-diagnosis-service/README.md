@@ -194,37 +194,6 @@ references: [ARCHITECTURE.md#5-一致性边界]   # 仅人工溯源，不投喂�
 | `RUNBOOKS_DIR` | `runbooks` | 相对服务根目录或绝对路径 |
 | `MAX_RUNBOOK_SECTION_CHARS` | `4000` | 知识段落总长度上限（超出整条丢弃） |
 
-## claim-level grounding（V2-6）
-
-V2-3 的回校验保证"**证据本身真实**"；V2-6 再保证"**结论挂在真实证据上**"，避免 `root_cause` /
-`recommended_actions` 出现"比证据更强"的措辞（例如把"当前两端库存一致且事件已 RESOLVED"
-写成"已被某流程修复"）。
-
-模型在同一次输出里额外给出 citation（**不是第二套 evidence**）：
-
-```json
-{"root_cause": "...",
- "root_cause_evidence_paths": ["incident.status", "redis.voucher_stock.value"],
- "evidence": [{"path": "incident.status", "note": "..."}, {"path": "redis.voucher_stock.value", "note": "..."}],
- "recommended_actions": [{"action": "...", "rationale": "...", "evidence_paths": ["incident.status"]}]}
-```
-
-服务端规则（全部可确定性判定）：
-
-| 规则 | 行为 |
-|---|---|
-| citation 只能引用同一次输出里 `evidence[].path` 中已有的 path | 不在其中 → 视为无效 citation |
-| path 是否合法 | 仍由 `evidence_validator` 唯一判定（不存在 / 语法非法 / `counter_presence=false` → 不算 accepted） |
-| 校验前的 evidence 顺序 | 只做**稳定重排序**（root citation → action citation → 其余），**不新增/删除条目** |
-| 四统计语义 | `submitted / accepted / dropped / over_limit` 与 V2-3.3 完全一致（真实 `15/10/0/5` 仍为 `15/10/0/5`），只有 `accepted` 的具体 path 集合可能变化 |
-| `DIAGNOSED` 的 root_cause | 至少 1 条 citation 最终 accepted；为空或全无效 → 降级 `INSUFFICIENT_EVIDENCE`（正规化）；部分有效 → 保留，仅记 invalid 计数 |
-| 单条 action | 至少 1 条 citation 最终 accepted 才保留；无 citation 或全无效 → **只丢弃该条**，不降级整份诊断 |
-| citations 的可见性 | 仅内部使用：不进入 `DiagnosisResult`、不进入 Java、不计入 `evidence_validation`、不落库 |
-| 日志 | 只记录计数：`root_cited / root_accepted / invalid / dropped_actions / downgraded`（不打印 claim、Context 或 Runbook 正文） |
-
-边界（明确不做）：不做自然语言蕴含判定，不引入 verifier LLM / NLI / 第二套 validator / 新框架；
-`services/evidence_validator.py` 保持零改动，仍是 path / `observed` / `counter_presence` 的唯一权威。
-
 ## 测试
 
 ```powershell
@@ -237,4 +206,4 @@ V2-3 的回校验保证"**证据本身真实**"；V2-6 再保证"**结论挂在�
 `tests/fixtures/` 中的样本由 V2-2 真实 smoke 捕获后**脱敏**生成
 （业务 id 改号、时间与 stream id 替换为合成值），保留结构与语义，不含本地运行细节。
 
-V2-6.1：evidence 重排与动作过滤都只使用先按 MAX_ACTIONS 截断的候选动作，超限动作不影响 accepted path 或 dropped_actions。claim citation 只保证结论引用了真实 accepted evidence，不构成自然语言语义蕴含的形式化证明。
+证据回校验证明的是"模型引用的数据真实存在"，不是"自然语言根因被形式化证明"；`evidence_validation` 继续冻结 `submitted = accepted + dropped + over_limit`。
