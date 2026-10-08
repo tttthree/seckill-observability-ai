@@ -52,13 +52,14 @@ class IncidentContextControllerTest {
     @Test
     void shouldReturnContextWhenIncidentExists() throws Exception {
         when(incidentContextBuilder.build(4L)).thenReturn(new IncidentContext()
-                .setContextVersion("v2-2.1")
-                .setContextQuality(new IncidentContext.ContextQuality().setComplete(true)));
+                .setContextVersion("v3.0")
+                .setUnavailableSources(java.util.List.of()));
 
         anonymousMvc.perform(get("/admin/incidents/4/context"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.context_version").value("v2-2.1"))
-                .andExpect(jsonPath("$.context_quality.complete").value(true));
+                .andExpect(jsonPath("$.context_version").value("v3.0"))
+                .andExpect(jsonPath("$.unavailable_sources").isArray())
+                .andExpect(jsonPath("$.unavailable_sources").isEmpty());
     }
 
     @Test
@@ -72,7 +73,7 @@ class IncidentContextControllerTest {
         secured.perform(get("/admin/incidents/4/context"))
                 .andExpect(status().isForbidden());
 
-        when(incidentContextBuilder.build(4L)).thenReturn(new IncidentContext().setContextVersion("v2-2.1"));
+        when(incidentContextBuilder.build(4L)).thenReturn(new IncidentContext().setContextVersion("v3.0"));
         secured.perform(get("/admin/incidents/4/context").header("X-Admin-Token", "secret-token"))
                 .andExpect(status().isOk());
     }

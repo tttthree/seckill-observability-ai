@@ -53,8 +53,8 @@ def test_healthz_reports_configuration_without_secrets(http):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["prompt_version"] == "v2-6.1"
-    assert body["supported_context_versions"] == ["v2-2.1"]
+    assert body["prompt_version"] == "v3.0"
+    assert body["supported_context_versions"] == ["v3.0"]
     assert isinstance(body["model_configured"], bool)
     assert "api_key" not in json.dumps(body)
     # V2-5：KB 状态可见（本仓库 runbooks/ 内 4 条有效知识，缺失/非法时也不阻塞服务启动）
@@ -74,9 +74,9 @@ def test_diagnosis_happy_path(http):
     assert response.status_code == 200
     body = response.json()
     assert body["diagnosis_status"] == "DIAGNOSED"
-    assert body["context_version"] == "v2-2.1"
+    assert body["context_version"] == "v3.0"
     assert body["evidence"][0]["path"] == "incident.status"
-    assert body["evidence"][0]["observed"] == "RESOLVED"
+    assert body["evidence"][0]["observed"] == "OPEN"
     assert body["recommended_actions"][0]["requires_human"] is True
     assert body["error_code"] is None
     # V2-3.3：HTTP 契约必须显式给出 over_limit（与 dropped 分离）
@@ -94,15 +94,15 @@ def test_api_separates_over_limit_from_dropped(client_factory):
         "incident.status",
         "incident.incident_id",
         "incident.severity",
-        "incident.source",
-        "incident.business_key",
+        "redis.dirty",
+        "redis.mismatch_pending",
         "incident.occurrence_count",
         "incident.detected_snapshot.redis_stock",
         "incident.detected_snapshot.db_stock",
         "incident.detected_snapshot.deviation",
-        "redis.voucher_stock.value",
-        "database.seckill_voucher.stock",
-        "metrics.counters.total_requests",
+        "redis.stock.value",
+        "database.stock",
+        "database.voucher_exists",
     ]
     payload = dict(GOOD_LLM)
     payload["evidence"] = [{"path": p, "note": None} for p in valid_paths]
@@ -171,7 +171,7 @@ def test_unsupported_context_version_returns_422(http):
     assert response.status_code == 422
     body = response.json()
     assert body["error_code"] == "UNSUPPORTED_CONTEXT_VERSION"
-    assert body["supported_context_versions"] == ["v2-2.1"]
+    assert body["supported_context_versions"] == ["v3.0"]
 
 
 def test_context_too_large_returns_413(client_factory):

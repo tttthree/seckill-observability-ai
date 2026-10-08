@@ -59,13 +59,13 @@ class AiDiagnosisClientImplTest {
 
     private static final String DIAGNOSED_BODY = "{"
             + "\"diagnosis_status\":\"DIAGNOSED\","
-            + "\"context_version\":\"v2-2.1\","
+            + "\"context_version\":\"v3.0\","
             + "\"incident_id\":9001,"
             + "\"incident_type\":\"INVENTORY_MISMATCH\","
             + "\"root_cause\":\"券维度 Redis 库存采集中断\","
             + "\"evidence\":["
             + "{\"path\":\"incident.status\",\"observed\":\"RESOLVED\",\"note\":\"事件已恢复\"},"
-            + "{\"path\":\"metrics.counters.total_requests\",\"observed\":2.0,\"note\":null}],"
+            + "{\"path\":\"redis.stock.value\",\"observed\":2.0,\"note\":null}],"
             + "\"recommended_actions\":[{\"action\":\"人工核对库存\",\"rationale\":\"不自动覆盖\","
             + "\"requires_human\":true}],"
             + "\"insufficient_reason\":null,"
@@ -78,7 +78,7 @@ class AiDiagnosisClientImplTest {
 
     private static final String INSUFFICIENT_BODY = "{"
             + "\"diagnosis_status\":\"INSUFFICIENT_EVIDENCE\","
-            + "\"context_version\":\"v2-2.1\","
+            + "\"context_version\":\"v3.0\","
             + "\"incident_id\":9001,"
             + "\"incident_type\":\"INVENTORY_MISMATCH\","
             + "\"root_cause\":null,"
@@ -94,7 +94,7 @@ class AiDiagnosisClientImplTest {
 
     private static final String UNAVAILABLE_BODY = "{"
             + "\"diagnosis_status\":\"UNAVAILABLE\","
-            + "\"context_version\":\"v2-2.1\","
+            + "\"context_version\":\"v3.0\","
             + "\"incident_id\":9001,"
             + "\"incident_type\":\"INVENTORY_MISMATCH\","
             + "\"root_cause\":null,"
@@ -192,7 +192,7 @@ class AiDiagnosisClientImplTest {
     void shouldSerializeFrozenContractRequestBody() {
         server.expect(requestTo(properties.getUrl()))
                 .andExpect(method(HttpMethod.POST))
-                .andExpect(jsonPath("$.incident_context.context_version").value("v2-2.1"))
+                .andExpect(jsonPath("$.incident_context.context_version").value("v3.0"))
                 .andExpect(jsonPath("$.incident_context.incident.incident_id").value(9001))
                 .andExpect(jsonPath("$.incident_context.incident.incident_type").value("INVENTORY_MISMATCH"))
                 .andRespond(withSuccess(DIAGNOSED_BODY, MediaType.APPLICATION_JSON));
@@ -206,7 +206,7 @@ class AiDiagnosisClientImplTest {
 
     @Test
     void shouldRejectContextVersionMismatch() {
-        String body = DIAGNOSED_BODY.replace("\"context_version\":\"v2-2.1\"",
+        String body = DIAGNOSED_BODY.replace("\"context_version\":\"v3.0\"",
                 "\"context_version\":\"v2-9.9\"");
         assertDegradedAfterSingleCall(body, AiDiagnosisClientImpl.CODE_RESPONSE_INVALID);
     }
@@ -252,7 +252,7 @@ class AiDiagnosisClientImplTest {
                 .replace("\"submitted\":3,\"accepted\":2,\"dropped\":1,\"over_limit\":0",
                         "\"submitted\":3,\"accepted\":0,\"dropped\":3,\"over_limit\":0")
                 .replace("{\"path\":\"incident.status\",\"observed\":\"RESOLVED\",\"note\":\"事件已恢复\"},", "")
-                .replace("{\"path\":\"metrics.counters.total_requests\",\"observed\":2.0,\"note\":null}", "");
+                .replace("{\"path\":\"redis.stock.value\",\"observed\":2.0,\"note\":null}", "");
         assertDegradedAfterSingleCall(body, AiDiagnosisClientImpl.CODE_RESPONSE_INVALID);
     }
 
@@ -699,17 +699,16 @@ class AiDiagnosisClientImplTest {
         assertEquals(0, result.getEvidenceValidation().getAccepted());
         assertEquals(0, result.getEvidenceValidation().getDropped());
         assertEquals(0, result.getEvidenceValidation().getOverLimit());
-        assertEquals("v2-2.1", result.getContextVersion());
+        assertEquals("v3.0", result.getContextVersion());
         assertEquals(9001L, result.getIncidentId());
         assertEquals("INVENTORY_MISMATCH", result.getIncidentType());
     }
 
     private static IncidentContext context() {
         return new IncidentContext()
-                .setContextVersion("v2-2.1")
+                .setContextVersion("v3.0")
                 .setBuiltAt(Instant.parse("2026-09-23T14:00:00Z"))
                 .setIncident(new IncidentContext.IncidentEvidence()
-                        .setObservedAt(Instant.parse("2026-09-23T14:00:00Z"))
                         .setIncidentId(9001L)
                         .setIncidentType("INVENTORY_MISMATCH"));
     }

@@ -1,0 +1,37 @@
+{
+  "context_version": "v3.0",
+  "built_at": "2026-01-15T08:00:00.000Z",
+  "incident": {
+    "incident_id": 9004,
+    "incident_type": "CONSUMER_UNHEALTHY",
+    "severity": "CRITICAL",
+    "status": "OPEN",
+    "related_voucher_id": null,
+    "occurrence_count": 3,
+    "first_detected_at": "2026-01-15T16:30:00",
+    "last_detected_at": "2026-01-15T16:35:00",
+    "resolved_at": null,
+    "title": "秒杀消费者线程不可用",
+    "description": "消费者健康检查返回 DOWN：消费者心跳超时: 41000ms",
+    "detected_snapshot": {
+      "health_status": "DOWN",
+      "consumer_status": "DOWN",
+      "reason": "消费者心跳超时: 41000ms",
+      "heartbeat_age_ms": 41000,
+      "success_heartbeat_age_ms": 90000,
+      "pending_count": 1500,
+      "checked_at": 1768466100000
+    }
+  },
+  "redis": null,
+  "database": null,
+  "queue": null,
+  "consumer_health": {
+    "status": "DOWN",
+    "heartbeat_age_ms": 41000,
+    "success_heartbeat_age_ms": 90000,
+    "pending_count": 1500,
+    "reason": "消费者心跳超时: 41000ms"
+  },
+  "unavailable_sources": []
+}

@@ -1,4 +1,4 @@
-"""Runbook 检索测试：类型硬过滤、打分、排序、Top-2、阈值语义与信号闭集。"""
+"""Runbook 检索测试：类型硬过滤、打分、排序、Top-2、阈值语义与信号闭集（v3.0 契约）。"""
 
 import json
 
@@ -44,13 +44,14 @@ def clone(payload: dict) -> dict:
 
 
 def consumer_context(payload: dict, **health) -> IncidentContext:
+    """构造 CONSUMER_UNHEALTHY 样本；status 直接给投影后的三态。"""
     data = clone(payload)
     data["incident"]["incident_type"] = "CONSUMER_UNHEALTHY"
+    data["redis"] = None
+    data["database"] = None
+    data["queue"] = None
     data["consumer_health"] = {
-        "observed_at": "2026-09-24T00:00:00.000Z",
-        "status": "UP",
-        "consumer_status": "HEALTHY",
-        "consumer_alive": True,
+        "status": "HEALTHY",
         "heartbeat_age_ms": 100,
         "success_heartbeat_age_ms": 100,
         "pending_count": 0,
@@ -149,32 +150,19 @@ def test_derive_signals_for_real_fixture(context):
 
     assert "snapshot:deviation_positive" in signals
     assert "snapshot:redis_lt_db" in signals
-    assert "counter_present:total_requests" in signals
-    assert "counter_positive:total_requests" in signals
-    assert "consumer:pending_high" not in signals
+    assert "redis:dirty" in signals
+    assert "redis:mismatch_pending" in signals
+    assert "redis:stock_absent" not in signals
+    # metrics / counter_presence 已删除，不得再产生任何 counter 信号
+    assert not any(signal.startswith("counter_") for signal in signals)
 
 
-def test_counter_positive_requires_presence_true(context_payload):
-    """presence=false 的计数器（即使数值为正）不得参与检索。"""
-    data = clone(context_payload)
-    data["metrics"]["counters"]["consume_error"] = 5.0
-    data["metrics"]["counter_presence"]["consume_error"] = False
-    data["metrics"]["counters"]["commit_error"] = 7.0
-    data["metrics"]["counter_presence"]["commit_error"] = True
-    context_with_presence = IncidentContext.model_validate(data)
+def test_redis_stock_absent_signal_comes_from_present_false(missing_stock_payload):
+    """stock key 确实不存在时才产生 stock_absent（present=false），不依赖数值大小。"""
+    signals = derive_signals(IncidentContext.model_validate(missing_stock_payload))
 
-    signals = derive_signals(context_with_presence)
-
-    assert "counter_positive:consume_error" not in signals
-    assert "counter_present:consume_error" not in signals
-    assert "counter_positive:commit_error" in signals
-
-    retriever = RunbookRetriever(make_store(
-        make_runbook("rb-presence", ["INVENTORY_MISMATCH"], signals=["counter_positive:consume_error"]),
-    ))
-    result = retriever.retrieve(context_with_presence)
-
-    assert result.runbooks[0].score == 0, "presence=false 的 counter 不得贡献检索分数"
+    assert "redis:stock_absent" in signals
+    assert "redis:dirty" in signals
 
 
 def test_pending_high_requires_strictly_greater_than_1000(context_payload):
@@ -197,42 +185,53 @@ def test_heartbeat_thresholds_are_strict(context_payload):
     assert "consumer:success_heartbeat_age_high" in above_threshold
 
 
-def test_consumer_status_and_alive_signals(context_payload):
+def test_consumer_status_signal_uses_projected_tri_state(context_payload):
     down = derive_signals(consumer_context(
-        context_payload, status="DOWN", consumer_status=None, consumer_alive=False, reason="消费者线程未启动"))
-    degraded = derive_signals(consumer_context(context_payload, consumer_status="DEGRADED"))
+        context_payload, status="DOWN", reason="消费者线程未启动"))
+    degraded = derive_signals(consumer_context(context_payload, status="DEGRADED"))
+    healthy = derive_signals(consumer_context(context_payload, status="HEALTHY"))
 
     assert "consumer:status:DOWN" in down
-    assert "consumer:alive:false" in down
-    assert "consumer:consumer_status:DEGRADED" in degraded
+    assert "consumer:status:DEGRADED" in degraded
+    assert "consumer:status:HEALTHY" in healthy
+    # 旧的拆分信号已删除
+    assert not any(signal.startswith("consumer:alive") for signal in down)
+    assert not any(signal.startswith("consumer:consumer_status") for signal in degraded)
 
 
-def test_dead_letter_signals(context_payload):
-    data = clone(context_payload)
-    data["incident"]["incident_type"] = "DEAD_LETTER"
-    data["queue"] = {
-        "observed_at": "2026-09-24T00:00:00.000Z",
-        "main_stream": None,
-        "consumer_group": None,
-        "dead_letter_stream": None,
-        "dead_letter_entries_for_voucher": [
-            {"stream_entry_id": "1-0", "original_message_id": "9-0", "voucher_id": 7001,
-             "order_id": 1, "failure_reason": "retry_exhausted"}
-        ],
-    }
-
-    signals = derive_signals(IncidentContext.model_validate(data))
+def test_dead_letter_signals(dead_letter_payload):
+    signals = derive_signals(IncidentContext.model_validate(dead_letter_payload))
 
     assert "dead_letter:present" in signals
     assert "dead_letter:reason:retry_exhausted" in signals
 
 
-def test_every_derived_signal_is_in_the_closed_vocabulary(context, missing_redis_payload, context_payload):
+def test_dead_letter_present_from_count_even_without_entries(context_payload):
+    """dead_letter_count > 0 但条目被券过滤掉时，仍应表达"死信流非空"。"""
+    data = clone(context_payload)
+    data["incident"]["incident_type"] = "DEAD_LETTER"
+    data["queue"] = {
+        "pending_count": 0,
+        "dead_letter_count": 3,
+        "dead_letters": [],
+    }
+
+    signals = derive_signals(IncidentContext.model_validate(data))
+
+    assert "dead_letter:present" in signals
+
+
+def test_every_derived_signal_is_in_the_closed_vocabulary(
+        context, missing_redis_payload, context_payload, dead_letter_payload, consumer_unhealthy_payload):
     contexts = [
         context,
         IncidentContext.model_validate(missing_redis_payload),
-        consumer_context(context_payload, status="DOWN", consumer_alive=False, pending_count=5000,
+        IncidentContext.model_validate(context_payload),
+        IncidentContext.model_validate(dead_letter_payload),
+        IncidentContext.model_validate(consumer_unhealthy_payload),
+        consumer_context(context_payload, status="DOWN", pending_count=5000,
                          heartbeat_age_ms=99_999, success_heartbeat_age_ms=99_999),
+        consumer_context(context_payload, status="DEGRADED", pending_count=1),
     ]
 
     for item in contexts:

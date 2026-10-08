@@ -1,17 +1,14 @@
 """evidence path 解析与回校验（防幻觉的核心）。
 
 冻结语法：`.属性` + `[下标]`，例如
-    queue.dead_letter_entries_for_voucher[0].failure_reason
-    metrics.counters.total_requests
+    queue.dead_letters[0].failure_reason
+    redis.stock.value
     incident.detected_snapshot.redis_stock
 
 规则：
 - 属性访问只能落在对象上；下标访问只能落在数组上；
-- path 不存在 / 语法非法 → 该条证据被丢弃并计入 dropped；
+- path 不存在 / 语法非法 / 同一 path 重复 → 该条证据被丢弃并计入 dropped；
 - 校验通过的证据，`observed` 一律取自 **Context 真实值**（模型给的值不被信任）；
-- **counter_presence 语义由代码强制**：形如 `metrics.counters.<name>` 的路径，
-  必须 `metrics.counter_presence.<name>` 严格为 true 才可通过；
-  presence 为 false / 缺失 / 无法解析时一律 dropped（不得只依赖 system prompt）；
 - 上限（max_items）只决定"是否进入最终 evidence"，超限的合法条目计入 over_limit，不计入 dropped。
 """
 
@@ -22,10 +19,6 @@ from models.diagnosis import Evidence, EvidenceValidation, LLMEvidence
 
 _ATTR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INDEX_RE = re.compile(r"\d+\]")
-
-# metrics.counters.<name> 的路径前缀
-_COUNTERS_PREFIX = ("metrics", "counters")
-_COUNTER_PRESENCE_TEMPLATE = "metrics.counter_presence.{name}"
 
 
 class PathSyntaxError(ValueError):
@@ -96,31 +89,6 @@ def resolve_path(context: Any, path: str) -> Any:
     return resolve_tokens(context, parse_path(path), path)
 
 
-def is_counter_path(tokens: Sequence[Union[str, int]]) -> bool:
-    """是否为 metrics.counters.<counter_name> 形态。"""
-    return (
-        len(tokens) >= 3
-        and tokens[0] == _COUNTERS_PREFIX[0]
-        and tokens[1] == _COUNTERS_PREFIX[1]
-        and isinstance(tokens[2], str)
-    )
-
-
-def counter_presence_allows(context_json: Any, tokens: Sequence[Union[str, int]]) -> bool:
-    """counter_presence 闸门：只有严格 true 才允许该 counter value 作为已验证证据。
-
-    非 counter 路径不受此规则约束（返回 True）。
-    """
-    if not is_counter_path(tokens):
-        return True
-    name = str(tokens[2])
-    try:
-        presence = resolve_path(context_json, _COUNTER_PRESENCE_TEMPLATE.format(name=name))
-    except (PathSyntaxError, PathNotFound):
-        return False
-    return presence is True
-
-
 def validate_evidence(
     context_json: dict,
     items: List[LLMEvidence],
@@ -128,16 +96,15 @@ def validate_evidence(
 ) -> tuple[List[Evidence], EvidenceValidation]:
     """回校验**全部** submitted 证据，返回（进入最终结果的证据, 统计）。
 
-    每条证据都会依次经过：parse → resolve → duplicate → counter_presence。
+    每条证据都会依次经过：parse → resolve → duplicate。
     三种去向互斥且穷尽（冻结不变量 submitted == accepted + dropped + over_limit）：
 
-    - dropped   ：被校验拒绝 —— path 语法非法 / path 不存在 / duplicate path /
-                  metrics.counters.<name> 的 counter_presence 不严格为 true；
+    - dropped   ：被校验拒绝 —— path 语法非法 / path 不存在 / duplicate path；
     - accepted  ：通过全部校验且未触及上限，进入最终 evidence；
     - over_limit：通过全部校验，但 accepted 已达 max_items，故不进入最终 evidence（**不是错误**）。
 
     注意：达到上限后**不会提前跳出**——超限部分仍会被完整校验，
-    因此其中的 duplicate / presence 违规会被正确计入 dropped。
+    因此其中的 duplicate 违规会被正确计入 dropped。
     """
     accepted: List[Evidence] = []
     seen_paths: set[str] = set()
@@ -157,18 +124,12 @@ def validate_evidence(
             continue
 
         # 3) duplicate path：以"已通过 parse/resolve 的路径"为准
-        #    （无论后续是否通过 counter_presence 或是否超限，都先占用该 path）
         if path in seen_paths:
             dropped += 1
             continue
         seen_paths.add(path)
 
-        # 4) counter_presence 闸门（metrics.counters.<name> 必须严格 true）
-        if not counter_presence_allows(context_json, tokens):
-            dropped += 1
-            continue
-
-        # 5) 上限：有效但未进入最终 evidence
+        # 4) 上限：有效但未进入最终 evidence
         if len(accepted) >= max_items:
             over_limit += 1
             continue

@@ -19,35 +19,19 @@ INCIDENT_TYPES = ("INVENTORY_MISMATCH", "DEAD_LETTER", "CONSUMER_UNHEALTHY")
 
 # ==================== 闭集信号词表 ====================
 
-# 计数器短名（与 Java MetricsConstants 的 10 个计数器一一对应）
-KNOWN_COUNTERS = (
-    "total_requests",
-    "reserve_success",
-    "reserve_error",
-    "duplicate_request",
-    "commit_success",
-    "commit_error",
-    "stock_fail_redis",
-    "stock_fail_db",
-    "consume_error",
-    "reconcile_mismatch",
-)
-
-# 固定信号
+# 固定信号（全部由 IncidentContext 已有字段派生，不引入新数据源）
 FIXED_SIGNALS = frozenset(
     {
         "snapshot:deviation_positive",
         "snapshot:redis_lt_db",
         "snapshot:redis_gt_db",
         "redis:stock_absent",
-        "redis:dirty_vouchers_present",
-        "redis:mismatch_marker_present",
+        "redis:dirty",
+        "redis:mismatch_pending",
         "dead_letter:present",
-        "consumer:alive:false",
+        "consumer:status:HEALTHY",
+        "consumer:status:DEGRADED",
         "consumer:status:DOWN",
-        "consumer:status:UP",
-        "consumer:consumer_status:DEGRADED",
-        "consumer:consumer_status:HEALTHY",
         "consumer:pending_high",
         "consumer:heartbeat_age_high",
         "consumer:success_heartbeat_age_high",
@@ -55,7 +39,6 @@ FIXED_SIGNALS = frozenset(
 )
 
 _REASON_SIGNAL_PREFIX = "dead_letter:reason:"
-_COUNTER_SIGNAL_PREFIXES = ("counter_present:", "counter_positive:")
 
 RUNBOOK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
 
@@ -75,9 +58,6 @@ def is_known_signal(signal: str) -> bool:
         return True
     if signal.startswith(_REASON_SIGNAL_PREFIX):
         return bool(signal[len(_REASON_SIGNAL_PREFIX) :].strip())
-    for prefix in _COUNTER_SIGNAL_PREFIXES:
-        if signal.startswith(prefix):
-            return signal[len(prefix) :] in KNOWN_COUNTERS
     return False
 
 

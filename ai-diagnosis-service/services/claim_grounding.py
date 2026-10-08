@@ -4,7 +4,7 @@
 - citation **不是第二套 evidence**：`root_cause_evidence_paths` / action `evidence_paths`
   只能引用**同一次模型输出里已经存在的 `evidence[].path`**；
 - 本模块**不做** Context 解析，也不判断 path 合法性 —— `evidence_validator.py` 仍是
-  path / observed / counter_presence 的唯一权威来源，本模块只在**最终 accepted evidence 的 path 集合**上做集合运算；
+  path / observed 的唯一权威来源，本模块只在**最终 accepted evidence 的 path 集合**上做集合运算；
 - 只允许对 `parsed.evidence` 做**稳定重排序**（citation 对应的条目优先），不新增、不删除任何 evidence item，
   因此 `submitted / accepted / dropped / over_limit` 四统计语义与 V2-3.3 完全一致（只有 accepted 的具体 path 集合可能变化）；
 - citation 仅内部使用：不进入 `DiagnosisResult`、不进入 Java、不进入 `evidence_validation`、不落库。

@@ -28,9 +28,9 @@ class Settings(BaseSettings):
 
     # ---- 契约闸门 ----
     # 只接受列出的 context_version；契约升级必须显式升版，不做隐式前向兼容
-    supported_context_versions: str = "v2-2.1"
+    supported_context_versions: str = "v3.0"
 
-    # ---- 轻量长度保护（严格请求体限流留到 V2-4）----
+    # ---- 轻量长度保护 ----
     max_context_chars: int = 200_000
     max_prompt_chars: int = 120_000
 

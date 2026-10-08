@@ -21,7 +21,7 @@ def load_fixture(name: str) -> dict:
 
 
 def assert_submitted_invariant(validation) -> None:
-    """V2-3.3 冻结不变量：每条 submitted 证据必须恰好落入三种去向之一。
+    """冻结不变量：每条 submitted 证据必须恰好落入三种去向之一。
 
     submitted == accepted（进入最终 evidence）+ dropped（校验拒绝）+ over_limit（合法但被输出上限截断）
     """
@@ -35,14 +35,32 @@ def assert_submitted_invariant(validation) -> None:
 
 @pytest.fixture
 def context_payload() -> dict:
-    """V2-2.1 冻结契约的真实（已脱敏）样本。"""
-    return load_fixture("incident_context_v2_2_1.json")
+    """IncidentContext v3.0 冻结契约的真实（已脱敏）样本：库存不一致。"""
+    return load_fixture("incident_context_v3_0.json")
 
 
 @pytest.fixture
 def missing_redis_payload() -> dict:
-    """券维度 Redis 采集中断的派生样本。"""
+    """券维度 Redis 读取失败（redis=null 且记入 unavailable_sources）。"""
     return load_fixture("incident_context_missing_redis.json")
+
+
+@pytest.fixture
+def missing_stock_payload() -> dict:
+    """Redis stock key 确实不存在（present=false / value=null）。"""
+    return load_fixture("incident_context_missing_stock.json")
+
+
+@pytest.fixture
+def dead_letter_payload() -> dict:
+    """死信隔离（重试超限）事件样本。"""
+    return load_fixture("incident_context_dead_letter.json")
+
+
+@pytest.fixture
+def consumer_unhealthy_payload() -> dict:
+    """消费者不可用事件样本。"""
+    return load_fixture("incident_context_consumer_unhealthy.json")
 
 
 @pytest.fixture
@@ -60,6 +78,16 @@ def runbook_tmp_dir():
 @pytest.fixture
 def context(context_payload: dict) -> IncidentContext:
     return IncidentContext.model_validate(context_payload)
+
+
+@pytest.fixture
+def dead_letter_context(dead_letter_payload: dict) -> IncidentContext:
+    return IncidentContext.model_validate(dead_letter_payload)
+
+
+@pytest.fixture
+def consumer_unhealthy_context(consumer_unhealthy_payload: dict) -> IncidentContext:
+    return IncidentContext.model_validate(consumer_unhealthy_payload)
 
 
 class StubDeepSeekClient:

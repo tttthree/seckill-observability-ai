@@ -1,0 +1,68 @@
+{
+  "context_version": "v3.0",
+  "built_at": "2026-01-15T08:00:00.000Z",
+  "incident": {
+    "incident_id": 9003,
+    "incident_type": "DEAD_LETTER",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "related_voucher_id": 7001,
+    "occurrence_count": 1,
+    "first_detected_at": "2026-01-15T16:20:00",
+    "last_detected_at": "2026-01-15T16:20:00",
+    "resolved_at": null,
+    "title": "订单消息重试超限进入死信队列（voucherId=7001）",
+    "description": "消息 1768465200000-0 超过最大重试次数 3，已隔离至死信队列，Redis 预占和下单资格仍保留（HELD），等待人工重放",
+    "detected_snapshot": {
+      "message_id": "1768465200000-0",
+      "voucher_id": 7001,
+      "order_id": 810000000000000003,
+      "failure_reason": "retry_exhausted",
+      "max_retry": 3,
+      "detected_at": 1768465200000
+    }
+  },
+  "redis": {
+    "stock": {
+      "present": true,
+      "value": 0
+    },
+    "ordered_user_count": 3,
+    "dirty": false,
+    "mismatch_pending": false
+  },
+  "database": {
+    "voucher_exists": true,
+    "stock": 0,
+    "order_count": 2,
+    "recent_orders": [
+      {
+        "order_id": 810000000000000001,
+        "create_time": "2026-01-15T15:59:00"
+      },
+      {
+        "order_id": 810000000000000002,
+        "create_time": "2026-01-15T15:58:00"
+      }
+    ]
+  },
+  "queue": {
+    "pending_count": 1,
+    "dead_letter_count": 1,
+    "dead_letters": [
+      {
+        "message_id": "1768465200000-0",
+        "order_id": 810000000000000003,
+        "failure_reason": "retry_exhausted"
+      }
+    ]
+  },
+  "consumer_health": {
+    "status": "HEALTHY",
+    "heartbeat_age_ms": 120,
+    "success_heartbeat_age_ms": 4500,
+    "pending_count": 1,
+    "reason": null
+  },
+  "unavailable_sources": []
+}

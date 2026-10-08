@@ -120,7 +120,7 @@ class IncidentDiagnosisControllerTest {
         mockMvc.perform(get("/admin/incidents/4/diagnosis"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.diagnosis_status").value("DIAGNOSED"))
-                .andExpect(jsonPath("$.context_version").value("v2-2.1"))
+                .andExpect(jsonPath("$.context_version").value("v3.0"))
                 .andExpect(jsonPath("$.incident_id").value(9001))
                 .andExpect(jsonPath("$.root_cause").value("券维度 Redis 库存采集中断"))
                 .andExpect(jsonPath("$.evidence[0].path").value("incident.status"))
@@ -139,7 +139,7 @@ class IncidentDiagnosisControllerTest {
         when(incidentContextBuilder.build(4L)).thenReturn(context());
         AiDiagnosisResult result = new AiDiagnosisResult();
         result.setDiagnosisStatus(AiDiagnosisResult.STATUS_INSUFFICIENT_EVIDENCE);
-        result.setContextVersion("v2-2.1");
+        result.setContextVersion("v3.0");
         result.setIncidentId(9001L);
         result.setIncidentType("INVENTORY_MISMATCH");
         result.setInsufficientReason("缺少同时刻库存证据");
@@ -163,7 +163,7 @@ class IncidentDiagnosisControllerTest {
         when(incidentContextBuilder.build(4L)).thenReturn(context());
         AiDiagnosisResult result = new AiDiagnosisResult();
         result.setDiagnosisStatus(AiDiagnosisResult.STATUS_UNAVAILABLE);
-        result.setContextVersion("v2-2.1");
+        result.setContextVersion("v3.0");
         result.setIncidentId(9001L);
         result.setIncidentType("INVENTORY_MISMATCH");
         result.setErrorCode("MODEL_NOT_CONFIGURED");
@@ -185,7 +185,7 @@ class IncidentDiagnosisControllerTest {
     void shouldReturnJavaDegradationAsHttp200() throws Exception {
         when(incidentContextBuilder.build(4L)).thenReturn(context());
         when(aiDiagnosisClient.diagnose(any())).thenReturn(AiDiagnosisResult.localUnavailable(
-                "v2-2.1", 9001L, "INVENTORY_MISMATCH",
+                "v3.0", 9001L, "INVENTORY_MISMATCH",
                 "AI_SERVICE_UNREACHABLE", null, null, 2, 4012L));
 
         mockMvc.perform(get("/admin/incidents/4/diagnosis"))
@@ -214,7 +214,7 @@ class IncidentDiagnosisControllerTest {
 
         when(incidentContextBuilder.build(4L)).thenReturn(context());
         when(aiDiagnosisClient.rateLimited(any())).thenReturn(AiDiagnosisResult.localUnavailable(
-                "v2-2.1", 9001L, "INVENTORY_MISMATCH",
+                "v3.0", 9001L, "INVENTORY_MISMATCH",
                 "AI_RATE_LIMITED", null, null, 0, 0L));
 
         mockMvc.perform(get("/admin/incidents/4/diagnosis"))
@@ -254,10 +254,9 @@ class IncidentDiagnosisControllerTest {
 
     private static IncidentContext context() {
         return new IncidentContext()
-                .setContextVersion("v2-2.1")
+                .setContextVersion("v3.0")
                 .setBuiltAt(Instant.parse("2026-09-23T14:00:00Z"))
                 .setIncident(new IncidentContext.IncidentEvidence()
-                        .setObservedAt(Instant.parse("2026-09-23T14:00:00Z"))
                         .setIncidentId(9001L)
                         .setIncidentType("INVENTORY_MISMATCH"));
     }
@@ -265,7 +264,7 @@ class IncidentDiagnosisControllerTest {
     private static AiDiagnosisResult diagnosedResult() {
         AiDiagnosisResult result = new AiDiagnosisResult();
         result.setDiagnosisStatus(AiDiagnosisResult.STATUS_DIAGNOSED);
-        result.setContextVersion("v2-2.1");
+        result.setContextVersion("v3.0");
         result.setIncidentId(9001L);
         result.setIncidentType("INVENTORY_MISMATCH");
         result.setRootCause("券维度 Redis 库存采集中断");

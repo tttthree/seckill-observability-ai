@@ -40,7 +40,7 @@ py -3.12 -m venv .venv
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
   -H "Content-Type: application/json" \
-  -d "{\"incident_context\": $(cat tests/fixtures/incident_context_v2_2_1.json)}"
+  -d "{\"incident_context\": $(cat tests/fixtures/incident_context_v3_0.json)}"
 ```
 
 响应示例（节选）：
@@ -48,13 +48,13 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
 ```json
 {
   "diagnosis_status": "DIAGNOSED",
-  "context_version": "v2-2.1",
+  "context_version": "v3.0",
   "incident_id": 9001,
   "incident_type": "INVENTORY_MISMATCH",
   "root_cause": "……",
   "evidence": [
-    {"path": "redis.voucher_stock.value", "observed": 1, "note": "构建时刻 Redis 库存已为 1"},
-    {"path": "incident.detected_snapshot.redis_stock", "observed": 0, "note": "最近一次检测证据显示为 0"}
+    {"path": "redis.stock.value", "observed": 1, "note": "构建时刻 Redis 库存已为 1"},
+    {"path": "incident.detected_snapshot.redis_stock", "observed": 1, "note": "最近一次检测证据"}
   ],
   "recommended_actions": [
     {"action": "人工核对券 7001 的 Redis 与 MySQL 库存", "rationale": "系统不自动覆盖库存", "requires_human": true}
@@ -63,21 +63,23 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
   "error_code": null,
   "evidence_validation": {"submitted": 2, "accepted": 2, "dropped": 0, "over_limit": 0},
   "model": "deepseek-flash",
-  "prompt_version": "v2-6.1",
+  "prompt_version": "v3.0",
   "diagnosed_at": "2026-01-15T08:00:12.345Z",
   "elapsed_ms": 4210
 }
 ```
 
-## 契约对齐（`context_version = v2-2.1`）
+## 契约对齐（`context_version = v3.0`）
 
 - 输入模型 `extra="forbid"`：**契约升级必须显式升版**，不做隐式前向兼容；
 - 冻结契约中**所有 key 必存在**（Java 侧 `@JsonInclude(ALWAYS)`），因此字段一律 required，
   可空字段写成 required nullable —— 字段缺失会 422，不会被静默当成 null；
-- 段为 `null` = 未计划或不可用；`present=false` 时 `value=null`（absent ≠ 0）；
-- `counter_presence=false` 的计数器数值只是项目缺省约定，Prompt 明确禁止当作真实观测值；
-- 时间语义：`built_at`/`observed_at` 为 UTC Instant；`incident.*_detected_at` 为无时区原值；
-  `detected_snapshot`(scope=`LATEST_DETECTION`) 是"最近一次检测证据"，与构建时刻状态严格区分。
+- 契约只包含当前真正能采的字段：运行指标由 Prometheus / `/metrics/seckill` 负责，
+  结构化日志与消费者组 lag 当前无可靠采集能力，**在 Schema 中不存在**（不以 null 或 notes 占位）；
+- `redis.stock.present=false` 时 `value=null`，`database.voucher_exists=false` 时 `stock=null`（absent ≠ 0）；
+- 段为 `null` 的两种含义必须区分：出现在 `unavailable_sources` 中 = 读取失败；不在其中 = 本次未计划采集；
+- 时间语义：`built_at` 为 UTC Instant；`incident.*_detected_at` 与 `recent_orders.create_time` 为无时区原值；
+  `detected_snapshot` 是检测时刻保存的历史证据，与构建时刻状态严格区分。
 
 ## 降级矩阵
 
@@ -102,19 +104,17 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
 ## 防幻觉机制
 
 `evidence[].path` 冻结语法为 `.属性` + `[下标]`（如
-`queue.dead_letter_entries_for_voucher[0].failure_reason`）。
+`queue.dead_letters[0].failure_reason`）。
 服务会按该语法把每条 path 回溯到输入 Context：
 
 - 能回溯 → 保留，并把 `observed` **覆盖为 Context 真实值**（模型给的值不被信任）；
-- 不能回溯 → 丢弃并计入 `evidence_validation.dropped`；
-- **`metrics.counters.<name>` 形态的路径由代码强制 `counter_presence` 语义**：
-  必须 `metrics.counter_presence.<name>` **严格为 true** 才可通过；
-  `presence=false` / 缺失 / 无法解析一律 dropped（不依赖 system prompt）；
+- 不能回溯（语法非法 / 路径不存在 / 重复） → 丢弃并计入 `evidence_validation.dropped`；
+- 契约中已删除的字段（如 `metrics.*`）自然不可解析，因此不需要额外的计数器闸门；
 - `DIAGNOSED` 但没有任何可回溯证据 → 强制降级为 `INSUFFICIENT_EVIDENCE`。
 
 ### `evidence_validation`：dropped 与 over_limit 的区别（V2-3.3）
 
-模型提交的**每一条** `evidence` 都会走完整校验链（`parse → resolve → duplicate → counter_presence`），
+模型提交的**每一条** `evidence` 都会走完整校验链（`parse → resolve → duplicate`），
 **不会因为数量达到上限而提前停止校验**。三种去向互斥且穷尽，冻结全局不变量：
 
 ```

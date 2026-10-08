@@ -28,18 +28,18 @@ GOOD_LLM = {
     "root_cause": "券维度 Redis 库存采集中断，构建时刻的库存状态与检测证据不一致。",
     "root_cause_evidence_paths": [
         "incident.detected_snapshot.redis_stock",
-        "redis.voucher_stock.value",
+        "redis.stock.value",
     ],
     "evidence": [
         {"path": "incident.detected_snapshot.redis_stock", "note": "最近一次检测证据显示 Redis 库存为 0"},
-        {"path": "redis.voucher_stock.value", "note": "构建时刻 Redis 库存已恢复为 1"},
-        {"path": "database.seckill_voucher.stock", "note": "数据库库存为 1"},
+        {"path": "redis.stock.value", "note": "构建时刻 Redis 库存已恢复为 1"},
+        {"path": "database.stock", "note": "数据库库存为 1"},
     ],
     "recommended_actions": [
         {
             "action": "人工核对券 7001 的 Redis 与 MySQL 库存",
             "rationale": "系统不会自动覆盖库存",
-            "evidence_paths": ["database.seckill_voucher.stock"],
+            "evidence_paths": ["database.stock"],
         }
     ],
     "insufficient_reason": None,
@@ -53,17 +53,17 @@ def test_diagnosed_result_metadata_is_generated_by_service(context):
 
     assert client.calls == 1
     assert result.diagnosis_status == "DIAGNOSED"
-    assert result.context_version == "v2-2.1"
+    assert result.context_version == "v3.0"
     assert result.incident_id == context.incident.incident_id
     assert result.model == settings.deepseek_model
-    assert result.prompt_version == "v2-6.1"
+    assert result.prompt_version == "v3.0"
     assert result.error_code is None
     assert result.diagnosed_at.tzinfo is not None
     assert result.elapsed_ms >= 0
     # observed 由服务按 Context 真实值回填
     observed = {e.path: e.observed for e in result.evidence}
-    assert observed["redis.voucher_stock.value"] == 1
-    assert observed["database.seckill_voucher.stock"] == 1
+    assert observed["redis.stock.value"] == 1
+    assert observed["database.stock"] == 2
     assert result.evidence_validation.submitted == 3
     assert result.evidence_validation.accepted == 3
     assert result.evidence_validation.dropped == 0
@@ -98,7 +98,7 @@ def test_action_requires_human_is_forced_by_service(context):
 def test_actions_are_capped(context):
     payload = dict(GOOD_LLM)
     payload["recommended_actions"] = [
-        {"action": f"a{i}", "rationale": "r", "evidence_paths": ["redis.voucher_stock.value"]}
+        {"action": f"a{i}", "rationale": "r", "evidence_paths": ["redis.stock.value"]}
         for i in range(9)
     ]
     service, _, settings = make_service(payload=payload)
@@ -112,7 +112,7 @@ def test_diagnosed_with_bogus_paths_is_downgraded(context):
     payload = {
         "diagnosis_status": "DIAGNOSED",
         "root_cause": "看似有根因",
-        "evidence": [{"path": "redis.voucher_stock.invented_field", "note": "编造"}],
+        "evidence": [{"path": "redis.stock.invented_field", "note": "编造"}],
         "recommended_actions": [],
         "insufficient_reason": None,
     }
@@ -376,14 +376,16 @@ def test_prompt_too_large_is_rejected(context):
     assert client.calls == 0
 
 
-def test_prompt_sent_to_model_has_no_notes(context):
+def test_prompt_sent_to_model_has_no_removed_contract_concepts(context):
+    """已随 v3.0 删除的段落/概念不得再出现在投喂给模型的 prompt 中。"""
     service, client, _ = make_service(payload=GOOD_LLM)
 
     service.diagnose(context)
 
     assert client.last_prompt is not None
-    for note in context.context_quality.notes:
-        assert note not in client.last_prompt
+    for removed in ("context_quality", "counter_presence", "planned_sources",
+                    "observed_at", "recent_previous_incidents", "business_key"):
+        assert removed not in client.last_prompt, removed
 
 
 def test_missing_redis_context_can_still_be_diagnosed_as_insufficient(missing_redis_payload):
@@ -399,4 +401,4 @@ def test_missing_redis_context_can_still_be_diagnosed_as_insufficient(missing_re
     result = service.diagnose(context)
 
     assert result.diagnosis_status == "INSUFFICIENT_EVIDENCE"
-    assert result.context_version == "v2-2.1"
+    assert result.context_version == "v3.0"

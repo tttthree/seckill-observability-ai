@@ -1,4 +1,4 @@
-"""Runbook 检索（V2-5）：确定性、纯本地、无 embedding / 无向量库 / 无分词依赖。
+"""Runbook 检索：确定性、纯本地、无 embedding / 无向量库 / 无分词依赖。
 
 冻结策略：
 - `incident_type` **硬过滤**：只在该故障类型的知识条目内排序；
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Iterable, Tuple
 
 from models.context import IncidentContext
-from models.runbook import KNOWN_COUNTERS, RetrievedRunbook, Runbook
+from models.runbook import RetrievedRunbook, Runbook
 from services.runbook_loader import RunbookStore
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ def _positive_number(value: object) -> bool:
 
 
 def derive_signals(context: IncidentContext) -> frozenset:
-    """从 EventContext 已存在的字段派生闭集信号（不新增数据源、不做推断）。"""
+    """从 IncidentContext 已存在的字段派生闭集信号（不新增数据源、不做推断）。"""
     signals = set()
 
     incident = context.incident
@@ -61,32 +61,19 @@ def derive_signals(context: IncidentContext) -> frozenset:
             elif redis_stock > db_stock:
                 signals.add("snapshot:redis_gt_db")
 
-    metrics = context.metrics
-    if metrics is not None:
-        presence = metrics.counter_presence or {}
-        counters = metrics.counters or {}
-        for name, present in presence.items():
-            if present is True and name in KNOWN_COUNTERS:
-                signals.add(f"counter_present:{name}")
-        for name, value in counters.items():
-            # 与 evidence 回校验同一语义：presence 不严格为 true 的计数器不得参与检索
-            if name in KNOWN_COUNTERS and presence.get(name) is True and _positive_number(value):
-                signals.add(f"counter_positive:{name}")
-
     redis = context.redis
     if redis is not None:
-        if redis.voucher_stock is not None and redis.voucher_stock.present is False:
+        if redis.stock is not None and redis.stock.present is False:
             signals.add("redis:stock_absent")
-        if redis.dirty_vouchers is not None and redis.dirty_vouchers.present is True:
-            signals.add("redis:dirty_vouchers_present")
-        if redis.reconcile_mismatch_marker is not None and redis.reconcile_mismatch_marker.present is True:
-            signals.add("redis:mismatch_marker_present")
+        if redis.dirty is True:
+            signals.add("redis:dirty")
+        if redis.mismatch_pending is True:
+            signals.add("redis:mismatch_pending")
 
     queue = context.queue
     if queue is not None:
-        entries = queue.dead_letter_entries_for_voucher or []
-        stream = queue.dead_letter_stream
-        if entries or (stream is not None and _positive_number(stream.length)):
+        entries = queue.dead_letters or []
+        if entries or _positive_number(queue.dead_letter_count):
             signals.add("dead_letter:present")
         for entry in entries:
             reason = (entry.failure_reason or "").strip()
@@ -95,16 +82,9 @@ def derive_signals(context: IncidentContext) -> frozenset:
 
     health = context.consumer_health
     if health is not None:
-        if health.consumer_alive is False:
-            signals.add("consumer:alive:false")
-        if health.status == "DOWN":
-            signals.add("consumer:status:DOWN")
-        elif health.status == "UP":
-            signals.add("consumer:status:UP")
-        if health.consumer_status == "DEGRADED":
-            signals.add("consumer:consumer_status:DEGRADED")
-        elif health.consumer_status == "HEALTHY":
-            signals.add("consumer:consumer_status:HEALTHY")
+        # status 已由 Java 侧投影为 HEALTHY / DEGRADED / DOWN 三态
+        if health.status in ("HEALTHY", "DEGRADED", "DOWN"):
+            signals.add(f"consumer:status:{health.status}")
         if health.pending_count is not None and health.pending_count > PENDING_HIGH_THRESHOLD:
             signals.add("consumer:pending_high")
         if health.heartbeat_age_ms is not None and health.heartbeat_age_ms > HEARTBEAT_AGE_HIGH_MS:

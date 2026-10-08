@@ -5,7 +5,7 @@ updated_at: 2026-09-24
 incident_types:
   - CONSUMER_UNHEALTHY
 match_signals:
-  - consumer:consumer_status:DEGRADED
+  - consumer:status:DEGRADED
   - consumer:success_heartbeat_age_high
 keywords:
   - 停滞
@@ -14,12 +14,12 @@ keywords:
   - 慢查询
   - GC
   - pending
-summary: 消费者线程存活、但仍有未 ACK 消息且长时间没有成功消费（pending_count > 0 且 success_heartbeat_age_ms > 60000，即 consumer_status=DEGRADED）。
+summary: 消费者线程存活、但仍有未 ACK 消息且长时间没有成功消费（pending_count > 0 且 success_heartbeat_age_ms > 60000，即 consumer_health.status=DEGRADED）。
 checks:
-  - 先确认判定条件：pending_count > 0 且 success_heartbeat_age_ms > 60000（对应 consumer_status=DEGRADED），且消费者存活（consumer_alive=true / status=UP）；心跳超过 30 秒属于 DOWN 路径，不是停滞。
-  - 核对 success_heartbeat_age_ms 与 heartbeat_age_ms：只有存活心跳在更新、成功心跳不动，即为长时间没有成功消费。
-  - 检查 pending_count 与 queue.consumer_group.pending_total 是否持续偏高，并按证据区分慢查询、死锁、Redis 连接池耗尽与 GC 停顿等可能原因。
-  - 结合 runtime 段的 heap_used_bytes / thread_count / uptime_ms，判断是否存在内存压力或线程异常，必要时由人工在业务低峰期重启消费者。
+  - 先确认判定条件：pending_count > 0 且 success_heartbeat_age_ms > 60000（对应 consumer_health.status=DEGRADED）；心跳超过 30 秒属于 DOWN 路径，不是停滞。
+  - 核对 consumer_health.success_heartbeat_age_ms 与 consumer_health.heartbeat_age_ms：只有存活心跳在更新、成功心跳不动，即为长时间没有成功消费。
+  - 检查 consumer_health.pending_count 与 queue.pending_count 是否持续偏高，并按证据区分慢查询、死锁、Redis 连接池耗尽与 GC 停顿等可能原因。
+  - 交集确认 queue.dead_letters 是否出现与该券相关的条目，判断停滞是否已经演化为重试超限隔离；必要时由人工在业务低峰期重启消费者。
 do_not:
   - 禁止仅凭停滞现象断定某笔订单已失败：停滞不等于订单丢失。
   - 禁止自动重启进程或自动重放未确认的消息。

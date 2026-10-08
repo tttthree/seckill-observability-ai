@@ -17,14 +17,13 @@ from services.claim_grounding import (
 )
 from services.diagnosis_service import DiagnosisService
 
-# fixture（incident_context_v2_2_1.json）中真实存在且能通过回校验的 path
+# fixture（incident_context_v3_0.json）中真实存在且能通过回校验的 path，顺序即模型输出顺序。
+# 下标 0~9 会被 accepted，10 之后为 over_limit，因此下标 12~14 必须在 accepted 区间内。
 VALID_PATHS = [
     "incident.status",
     "incident.incident_type",
     "incident.incident_id",
     "incident.severity",
-    "incident.source",
-    "incident.business_key",
     "incident.related_voucher_id",
     "incident.occurrence_count",
     "incident.title",
@@ -32,16 +31,17 @@ VALID_PATHS = [
     "incident.detected_snapshot.redis_stock",
     "incident.detected_snapshot.db_stock",
     "incident.detected_snapshot.deviation",
-    "redis.voucher_stock.value",
-    "redis.voucher_stock.present",
-    "database.seckill_voucher.stock",
-    "database.order_count_for_voucher",
-    "metrics.counters.total_requests",
-    "context_quality.complete",
+    "redis.stock.value",
+    "redis.stock.present",
+    "database.stock",
+    "database.order_count",
+    "database.voucher_exists",
+    "redis.dirty",
+    "redis.mismatch_pending",
 ]
 
-# presence=false → 无论数值如何都不能通过回校验（V2-5.1 语义）
-NOT_GROUNDABLE_PATH = "metrics.counters.consume_error"
+# 回校验拒绝的 path（Context 中不存在）→ 计入 dropped
+NOT_GROUNDABLE_PATH = "incident.nope"
 
 
 def make_service(payload, **overrides):
@@ -153,7 +153,7 @@ def test_max_actions_is_applied_before_grounding_filter():
 
 def test_diagnosed_with_grounded_root_cause_passes(context):
     payload = diagnosed_payload(
-        ["incident.status", "redis.voucher_stock.value"],
+        ["incident.status", "redis.stock.value"],
         ["incident.status"],
         actions=[{"action": "人工核对库存", "rationale": "两端不一致", "evidence_paths": ["incident.status"]}],
     )
@@ -164,7 +164,7 @@ def test_diagnosed_with_grounded_root_cause_passes(context):
     assert client.calls == 1
     assert result.diagnosis_status == "DIAGNOSED"
     assert result.root_cause
-    assert [item.path for item in result.evidence] == ["incident.status", "redis.voucher_stock.value"]
+    assert [item.path for item in result.evidence] == ["incident.status", "redis.stock.value"]
     assert [action.action for action in result.recommended_actions] == ["人工核对库存"]
     assert result.recommended_actions[0].requires_human is True
     assert_submitted_invariant(result.evidence_validation)
@@ -252,7 +252,7 @@ def test_reordering_preserves_counts_and_promotes_cited_evidence(context):
 def test_reordering_keeps_duplicate_semantics(context):
     # 重复 path 仍然只保留第一条、其余计入 dropped（顺序变化不改变计数）
     payload = diagnosed_payload(
-        ["incident.status", "incident.status", "redis.voucher_stock.value"],
+        ["incident.status", "incident.status", "redis.stock.value"],
         ["incident.status"],
         actions=[],
     )

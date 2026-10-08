@@ -2,8 +2,9 @@ package com.hmdp.service.impl;
 
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.hmdp.constant.ContextConstants;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.hmdp.dto.context.IncidentContext;
 import com.hmdp.entity.Incident;
 import com.hmdp.entity.SeckillVoucher;
@@ -28,9 +29,7 @@ import org.springframework.boot.actuate.health.Health;
 import org.springframework.data.redis.connection.RedisZSetCommands.Limit;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.RecordId;
-import org.springframework.data.redis.connection.stream.StreamInfo;
 import org.springframework.data.redis.connection.stream.StreamRecords;
-import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StreamOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -38,10 +37,8 @@ import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -52,18 +49,19 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * V2-2 Context Builder 采集策略、部分失败、白名单与有界读取测试（不依赖 Redis / MySQL）。
+ * IncidentContext v3.0 采集策略、部分失败与 JSON 契约测试（不依赖 Redis / MySQL）。
+ *
+ * <p>
+ * 覆盖：三类 Incident 的最小采集范围、单数据源失败不拖垮其它数据源、
+ * missing ≠ 0、detected_snapshot 显式 null、隐私（无 user_id）、契约字段收敛。
+ * </p>
  */
+@SuppressWarnings("unchecked")
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class IncidentContextBuilderImplTest {
@@ -106,613 +104,452 @@ class IncidentContextBuilderImplTest {
         when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
         when(stringRedisTemplate.opsForSet()).thenReturn(setOperations);
         when(stringRedisTemplate.opsForStream()).thenReturn(streamOperations);
+    }
 
+    /** 复刻应用配置：JavaTimeModule + 全局 NON_NULL（类级 ALWAYS 仍须压过它）。 */
+    private static ObjectMapper mapper() {
+        return new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .setSerializationInclusion(
+                        com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
+    }
+
+    // ==================== 公共桩 ====================
+
+    private Incident incident(IncidentType type, String snapshot) {
+        return new Incident()
+                .setId(INCIDENT_ID)
+                .setIncidentType(type)
+                .setSeverity(IncidentSeverity.HIGH)
+                .setSource(IncidentSource.RECONCILE)
+                .setStatus(IncidentStatus.OPEN)
+                .setBusinessKey("voucher:" + VOUCHER_ID)
+                .setRelatedVoucherId(VOUCHER_ID)
+                .setOccurrenceCount(2)
+                .setFirstDetectedAt(LocalDateTime.of(2026, 1, 15, 15, 58))
+                .setLastDetectedAt(LocalDateTime.of(2026, 1, 15, 16, 4, 30))
+                .setTitle("测试故障事件")
+                .setDescription("测试用描述")
+                .setSnapshot(snapshot);
+    }
+
+    private void stubIncident(IncidentType type, String snapshot) {
+        when(incidentService.getIncident(INCIDENT_ID)).thenReturn(incident(type, snapshot));
+    }
+
+    private void stubRedisHealthy() {
+        when(valueOperations.get("seckill:stock:" + VOUCHER_ID)).thenReturn("1");
+        when(stringRedisTemplate.hasKey("seckill:order:" + VOUCHER_ID)).thenReturn(true);
+        when(setOperations.size("seckill:order:" + VOUCHER_ID)).thenReturn(2L);
+        when(setOperations.isMember("seckill:voucher:dirty", String.valueOf(VOUCHER_ID)))
+                .thenReturn(true);
+        when(valueOperations.get("seckill:reconcile:mismatch:" + VOUCHER_ID)).thenReturn("1768464000000");
+    }
+
+    private void stubDatabaseHealthy() {
         when(seckillVoucherMapper.selectById(VOUCHER_ID))
-                .thenReturn(new SeckillVoucher().setVoucherId(VOUCHER_ID).setStock(1));
+                .thenReturn(new SeckillVoucher().setVoucherId(VOUCHER_ID).setStock(2));
         when(voucherOrderMapper.selectCount(any())).thenReturn(2);
         when(voucherOrderMapper.selectList(any())).thenReturn(List.of(
                 new VoucherOrder().setId(640780039339638786L).setUserId(3L).setVoucherId(VOUCHER_ID)
-                        .setCreateTime(LocalDateTime.of(2026, 9, 23, 18, 33, 49))));
+                        .setCreateTime(LocalDateTime.of(2026, 1, 15, 15, 59))));
+    }
+
+    private void stubQueueHealthy() {
+        when(streamOperations.size("stream.orders.dead")).thenReturn(1L);
+        Map<Object, Object> values = new LinkedHashMap<>();
+        values.put("voucherId", String.valueOf(VOUCHER_ID));
+        values.put("id", "810000000000000009");
+        values.put("originalMessageId", "1768465200000-0");
+        values.put("failureReason", "retry_exhausted");
+        List<MapRecord<String, Object, Object>> records = List.<MapRecord<String, Object, Object>>of(
+                StreamRecords.<String, Object, Object>mapBacked(values)
+                        .withId(RecordId.of("1768465200000-0")));
+        when(streamOperations.reverseRange(anyString(), any(), any(Limit.class)))
+                .thenReturn((List) records);
+    }
+
+    private void stubConsumerHealthy() {
         when(consumerHealthIndicator.health()).thenReturn(Health.up()
                 .withDetail("heartbeat_age_ms", 120L)
+                .withDetail("success_heartbeat_age_ms", 4500L)
                 .withDetail("consumer_status", "HEALTHY")
-                .withDetail("consumer_alive", true)
                 .withDetail("pending_count", 0L)
                 .build());
-        stubHealthyMetrics();
+    }
+
+    // ==================== A. INVENTORY_MISMATCH ====================
+
+    @Test
+    void inventoryMismatchCollectsOnlyIncidentRedisDatabase() {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubRedisHealthy();
+        stubDatabaseHealthy();
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNotNull(context.getIncident());
+        assertNotNull(context.getRedis());
+        assertNotNull(context.getDatabase());
+        // 未计划采集的数据源：段为 null，且不得进入 unavailable_sources
+        assertNull(context.getQueue());
+        assertNull(context.getConsumerHealth());
+        assertTrue(context.getUnavailableSources().isEmpty());
+        assertEquals("v3.0", context.getContextVersion());
+        assertNotNull(context.getBuiltAt());
+    }
+
+    // ==================== B. DEAD_LETTER ====================
+
+    @Test
+    void deadLetterCollectsAllFiveSources() {
+        stubIncident(IncidentType.DEAD_LETTER,
+                "{\"message_id\":\"1768465200000-0\",\"voucher_id\":7,\"order_id\":810000000000000009,"
+                        + "\"failure_reason\":\"retry_exhausted\",\"max_retry\":3}");
+        stubRedisHealthy();
+        stubDatabaseHealthy();
+        stubQueueHealthy();
+        stubConsumerHealthy();
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNotNull(context.getIncident());
+        assertNotNull(context.getRedis());
+        assertNotNull(context.getDatabase());
+        assertNotNull(context.getQueue());
+        assertNotNull(context.getConsumerHealth());
+        assertTrue(context.getUnavailableSources().isEmpty());
     }
 
     @Test
-    void shouldReturnNullWhenIncidentDoesNotExist() {
+    void deadLetterExposesOnlyCurrentVoucherDeadLetters() {
+        stubIncident(IncidentType.DEAD_LETTER, null);
+        stubRedisHealthy();
+        stubDatabaseHealthy();
+        stubConsumerHealthy();
+
+        when(streamOperations.size("stream.orders.dead")).thenReturn(2L);
+        Map<Object, Object> mine = new LinkedHashMap<>();
+        mine.put("voucherId", String.valueOf(VOUCHER_ID));
+        mine.put("id", "810000000000000009");
+        mine.put("originalMessageId", "1768465200000-0");
+        mine.put("failureReason", "retry_exhausted");
+        Map<Object, Object> other = new LinkedHashMap<>();
+        other.put("voucherId", "999");
+        other.put("id", "810000000000000010");
+        other.put("originalMessageId", "1768465200000-1");
+        other.put("failureReason", "retry_exhausted");
+        List<MapRecord<String, Object, Object>> records = List.<MapRecord<String, Object, Object>>of(
+                StreamRecords.<String, Object, Object>mapBacked(other)
+                        .withId(RecordId.of("1768465200000-1")),
+                StreamRecords.<String, Object, Object>mapBacked(mine)
+                        .withId(RecordId.of("1768465200000-0")));
+        when(streamOperations.reverseRange(anyString(), any(), any(Limit.class)))
+                .thenReturn((List) records);
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertEquals(1, context.getQueue().getDeadLetters().size());
+        assertEquals("1768465200000-0", context.getQueue().getDeadLetters().get(0).getMessageId());
+        assertEquals(810000000000000009L, context.getQueue().getDeadLetters().get(0).getOrderId());
+    }
+
+    // ==================== C. CONSUMER_UNHEALTHY ====================
+
+    @Test
+    void consumerUnhealthyCollectsOnlyIncidentAndConsumerHealth() {
+        stubIncident(IncidentType.CONSUMER_UNHEALTHY, null);
+        stubConsumerHealthy();
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNotNull(context.getIncident());
+        assertNotNull(context.getConsumerHealth());
+        // 不采 redis / database / queue
+        assertNull(context.getRedis());
+        assertNull(context.getDatabase());
+        assertNull(context.getQueue());
+        assertTrue(context.getUnavailableSources().isEmpty());
+    }
+
+    @Test
+    void consumerHealthStatusProjectsActuatorStateToSingleValue() {
+        stubIncident(IncidentType.CONSUMER_UNHEALTHY, null);
+        when(consumerHealthIndicator.health()).thenReturn(Health.down()
+                .withDetail("reason", "消费者心跳超时: 41000ms")
+                .build());
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        // Health DOWN → DOWN（不再分别输出 actuator status 与 consumer_alive）
+        assertEquals("DOWN", context.getConsumerHealth().getStatus());
+        assertEquals("消费者心跳超时: 41000ms", context.getConsumerHealth().getReason());
+    }
+
+    @Test
+    void consumerHealthDegradedKeepsSuccessHeartbeat() {
+        stubIncident(IncidentType.CONSUMER_UNHEALTHY, null);
+        when(consumerHealthIndicator.health()).thenReturn(Health.up()
+                .withDetail("heartbeat_age_ms", 100L)
+                .withDetail("success_heartbeat_age_ms", 90000L)
+                .withDetail("consumer_status", "DEGRADED")
+                .withDetail("pending_count", 12L)
+                .build());
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertEquals("DEGRADED", context.getConsumerHealth().getStatus());
+        assertEquals(90000L, context.getConsumerHealth().getSuccessHeartbeatAgeMs());
+        assertEquals(12L, context.getConsumerHealth().getPendingCount());
+    }
+
+    // ==================== D. source failure ====================
+
+    @Test
+    void redisFailureIsolatesOnlyThatSectionAndIsRecorded() {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubDatabaseHealthy();
+        when(valueOperations.get("seckill:stock:" + VOUCHER_ID))
+                .thenThrow(new RuntimeException("redis connection refused"));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNull(context.getRedis());
+        assertEquals(List.of("redis"), context.getUnavailableSources());
+        // 其它数据源继续构建
+        assertNotNull(context.getDatabase());
+        assertNotNull(context.getIncident());
+    }
+
+    @Test
+    void databaseFailureIsolatesOnlyThatSectionAndIsRecorded() {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubRedisHealthy();
+        when(seckillVoucherMapper.selectById(VOUCHER_ID))
+                .thenThrow(new RuntimeException("db down"));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNull(context.getDatabase());
+        assertEquals(List.of("database"), context.getUnavailableSources());
+        assertNotNull(context.getRedis());
+    }
+
+    @Test
+    void primaryIncidentReadFailurePropagatesInsteadOfBecomingUnavailable() {
+        // Incident 主记录查询异常按运维读失败语义显式失败，不得降级为 unavailable_sources
+        when(incidentService.getIncident(INCIDENT_ID))
+                .thenThrow(new RuntimeException("database unavailable"));
+
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> builder.build(INCIDENT_ID));
+        assertEquals("database unavailable", thrown.getMessage());
+    }
+
+    @Test
+    void missingIncidentReturnsNullForControllerToMap404() {
         when(incidentService.getIncident(INCIDENT_ID)).thenReturn(null);
 
         assertNull(builder.build(INCIDENT_ID));
     }
 
-    @Test
-    void shouldPropagatePrimaryEvidenceReadFailure() {
-        when(incidentService.getIncident(INCIDENT_ID)).thenThrow(new RuntimeException("db down"));
+    // ==================== E. missing Redis stock ====================
 
-        assertThrows(RuntimeException.class, () -> builder.build(INCIDENT_ID));
-    }
-
-    /** INVENTORY_MISMATCH 只计划 incident + metrics + voucher Redis + voucher DB */
     @Test
-    void shouldPlanOnlyInventorySourcesForInventoryMismatch() {
-        stubInventoryIncident();
-        stubRedisReads(true);
+    void absentRedisStockIsNullNotZero() {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubDatabaseHealthy();
+        // stock key 不存在
+        when(valueOperations.get("seckill:stock:" + VOUCHER_ID)).thenReturn(null);
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
-        assertEquals(List.of("incident", "metrics", "redis", "database"),
-                context.getContextQuality().getPlannedSources());
-        assertEquals(4, context.getContextQuality().getAvailableSources().size());
-        assertTrue(context.getContextQuality().getUnavailableSources().isEmpty());
-        assertTrue(context.getContextQuality().getComplete());
-        assertEquals(List.of("logs"), context.getContextQuality().getNotImplementedSources());
-
-        // 未计划的数据源既不采集也不出现在 quality 中
-        assertNull(context.getQueue());
-        assertNull(context.getConsumerHealth());
-        assertNull(context.getRuntime());
-        verify(streamOperations, never()).size(anyString());
-        verify(consumerHealthIndicator, never()).health();
+        assertFalse(context.getRedis().getStock().getPresent());
+        assertNull(context.getRedis().getStock().getValue());
     }
 
-    /** DEAD_LETTER 额外计划 queue + consumer_health，但不含 runtime */
     @Test
-    void shouldPlanQueueAndHealthForDeadLetter() {
-        stubIncident(deadLetterIncident(), List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
+    void absentVoucherDoesNotFabricateZeroStock() {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubRedisHealthy();
+        when(seckillVoucherMapper.selectById(VOUCHER_ID)).thenReturn(null);
+        when(voucherOrderMapper.selectCount(any())).thenReturn(0);
+        when(voucherOrderMapper.selectList(any())).thenReturn(Collections.emptyList());
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
-        assertEquals(List.of("incident", "metrics", "redis", "database", "queue", "consumer_health"),
-                context.getContextQuality().getPlannedSources());
-        assertNotNull(context.getQueue());
-        assertNotNull(context.getConsumerHealth());
-        assertNull(context.getRuntime());
-        assertNotNull(context.getQueue().getConsumerGroup());
-        assertEquals(Long.valueOf(15L), context.getQueue().getConsumerGroup().getConsumersTotal());
-        assertEquals(Long.valueOf(0L), context.getQueue().getConsumerGroup().getPendingTotal());
-        assertEquals("1790159932387-0", context.getQueue().getConsumerGroup().getLastDeliveredId());
+        assertFalse(context.getDatabase().getVoucherExists());
+        assertNull(context.getDatabase().getStock());
     }
 
-    /** CONSUMER_UNHEALTHY 计划 runtime，但不做券维度 Redis/DB 查询 */
+    // ==================== F. detected_snapshot 显式 null ====================
+
     @Test
-    void shouldPlanRuntimeForConsumerUnhealthy() {
-        stubIncident(consumerUnhealthyIncident(), List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
+    void snapshotKeepsExplicitNullValues() throws Exception {
+        stubIncident(IncidentType.INVENTORY_MISMATCH,
+                "{\"voucher_id\":7,\"redis_stock\":null,\"db_stock\":0,\"deviation\":null}");
+        stubRedisHealthy();
+        stubDatabaseHealthy();
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
-        assertEquals(List.of("incident", "metrics", "queue", "consumer_health", "runtime"),
-                context.getContextQuality().getPlannedSources());
-        assertNotNull(context.getRuntime());
-        assertNull(context.getRedis());
-        assertNull(context.getDatabase());
-        verify(seckillVoucherMapper, never()).selectById(anyLong());
-        verify(voucherOrderMapper, never()).selectList(any());
-    }
-
-    /** V2-2.2：incident 段构建失败时，不得出现在 available_sources */
-    @Test
-    void shouldNotMarkIncidentAvailableWhenItsCollectFails() {
-        stubInventoryIncident();
-        stubRedisReads(true);
-
-        IncidentContextBuilderImpl spy = spy(builder);
-        doThrow(new RuntimeException("incident evidence build failed"))
-                .when(spy).readIncidentEvidence(any(Incident.class), any(IncidentContextBuilderImpl.BuildState.class));
-
-        IncidentContext context = spy.build(INCIDENT_ID);
-
-        assertNull(context.getIncident());
-        assertFalse(context.getContextQuality().getAvailableSources().contains("incident"),
-                "collect 失败的数据源不得出现在 available_sources: " + context.getContextQuality().getAvailableSources());
-        assertTrue(context.getContextQuality().getUnavailableSources().contains("incident"));
-        assertFalse(context.getContextQuality().getComplete());
-    }
-
-    /** V2-2.2：consumer group 子读取失败必须记为 queue error 并使 complete=false，但不丢失其它 queue 数据 */
-    @Test
-    void shouldRecordQueueErrorWhenConsumerGroupReadFails() {
-        stubIncident(consumerUnhealthyIncident(), List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
-        when(streamOperations.groups("stream.orders"))
-                .thenThrow(new RuntimeException("xinfo groups failed: secret-detail"));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        // 其它 queue 数据保留
-        assertNotNull(context.getQueue());
-        assertEquals(Boolean.TRUE, context.getQueue().getMainStream().getExists());
-        assertEquals(Long.valueOf(4020L), context.getQueue().getMainStream().getLength());
-        // 该数据源本身未被整体判定为不可用
-        assertFalse(context.getContextQuality().getUnavailableSources().contains("queue"));
-        // 但必须记录 queue error 且 complete=false
-        assertFalse(context.getContextQuality().getComplete());
-        IncidentContext.SourceError error = context.getContextQuality().getErrors().stream()
-                .filter(e -> "queue".equals(e.getSource()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("缺少 queue source error: " + context.getContextQuality().getErrors()));
-        assertEquals("REDIS_ERROR", error.getErrorType());
-        assertEquals("redis read failed", error.getMessage());
-        assertFalse(error.getMessage().contains("secret-detail"));
-    }
-
-    /** V2-2.2：recent_orders 恰好 N 条不算截断，N+1 条才算且对外最多返回 N 条 */
-    @Test
-    void shouldNotReportRecentOrdersTruncationAtExactlyLimit() {
-        stubInventoryIncident();
-        stubRedisReads(true);
-        when(voucherOrderMapper.selectList(any()))
-                .thenReturn(orders(ContextConstants.RECENT_ORDERS_LIMIT));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        assertEquals(ContextConstants.RECENT_ORDERS_LIMIT, context.getDatabase().getRecentOrders().size());
-        assertTrue(context.getContextQuality().getTruncations().stream()
-                        .noneMatch(t -> "recent_orders".equals(t.getSource())),
-                "恰好 N 条不得判定为截断");
-        assertTrue(context.getContextQuality().getComplete());
-    }
-
-    @Test
-    void shouldReportRecentOrdersTruncationOnlyWhenExceedingLimit() {
-        stubInventoryIncident();
-        stubRedisReads(true);
-        when(voucherOrderMapper.selectList(any()))
-                .thenReturn(orders(ContextConstants.RECENT_ORDERS_LIMIT + 1));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        assertEquals(ContextConstants.RECENT_ORDERS_LIMIT, context.getDatabase().getRecentOrders().size(),
-                "对外最多返回 N 条");
-        IncidentContext.Truncation truncation = context.getContextQuality().getTruncations().stream()
-                .filter(t -> "recent_orders".equals(t.getSource()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("N+1 条必须记录截断"));
-        assertEquals(Integer.valueOf(ContextConstants.RECENT_ORDERS_LIMIT), truncation.getLimit());
-        assertEquals(Integer.valueOf(ContextConstants.RECENT_ORDERS_LIMIT), truncation.getReturned());
-    }
-
-    /** V2-2.2：死信扫描恰好 scanLimit 条不算截断，scanLimit+1 条才算且最多处理 scanLimit 条 */
-    @Test
-    void shouldNotReportDeadLetterTruncationAtExactlyScanLimit() {
-        stubIncident(deadLetterIncident(), List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
-        stubDeadLetterRecords(deadLetterRecords(ContextConstants.DEAD_LETTER_SCAN_LIMIT));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        assertTrue(context.getContextQuality().getTruncations().stream()
-                        .noneMatch(t -> "dead_letter_scan".equals(t.getSource())),
-                "恰好 scanLimit 条不得判定为截断");
-        assertTrue(context.getContextQuality().getComplete());
-    }
-
-    @Test
-    void shouldReportDeadLetterTruncationOnlyWhenExceedingScanLimit() {
-        stubIncident(deadLetterIncident(), List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
-        stubDeadLetterRecords(deadLetterRecords(ContextConstants.DEAD_LETTER_SCAN_LIMIT + 1));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        IncidentContext.Truncation truncation = context.getContextQuality().getTruncations().stream()
-                .filter(t -> "dead_letter_scan".equals(t.getSource()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("scanLimit+1 条必须记录截断"));
-        assertEquals(Integer.valueOf(ContextConstants.DEAD_LETTER_SCAN_LIMIT), truncation.getReturned());
-    }
-
-    /**
-     * V2-2.2：券级 Incident 只按 voucherId 过滤死信——
-     * 同券不同 orderId 的条目都应进入结果，snapshot.order_id 仅代表最近一次检测证据。
-     */
-    @Test
-    void shouldCollectAllDeadLetterEntriesOfSameVoucherRegardlessOfOrderId() {
-        // snapshot 里的 order_id=99，但同券还有 100/101 两条死信
-        stubIncident(deadLetterIncident(), List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
-        stubDeadLetterRecords(List.of(
-                deadLetterRecord("1-0", "7", "101"),
-                deadLetterRecord("2-0", "7", "100"),
-                deadLetterRecord("3-0", "7", "99"),
-                deadLetterRecord("4-0", "8", "77")));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        List<IncidentContext.DeadLetterEntry> entries = context.getQueue().getDeadLetterEntriesForVoucher();
-        assertEquals(3, entries.size(), "同券不同 orderId 的死信条目都应被收集");
-        List<Long> collectedOrderIds = new ArrayList<>();
-        for (IncidentContext.DeadLetterEntry entry : entries) {
-            collectedOrderIds.add(entry.getOrderId());
-        }
-        assertTrue(collectedOrderIds.containsAll(List.of(99L, 100L, 101L)), collectedOrderIds.toString());
-        assertTrue(entries.stream().allMatch(e -> Long.valueOf(7L).equals(e.getVoucherId())));
-    }
-
-    /** 无券维度时才退回 snapshot order_id 过滤 */
-    @Test
-    void shouldFallBackToSnapshotOrderIdWhenVoucherIsAbsent() {
-        Incident incident = deadLetterIncident().setRelatedVoucherId(null);
-        stubIncident(incident, List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
-        stubDeadLetterRecords(List.of(
-                deadLetterRecord("1-0", "7", "101"),
-                deadLetterRecord("2-0", "7", "99")));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        List<IncidentContext.DeadLetterEntry> entries = context.getQueue().getDeadLetterEntriesForVoucher();
-        assertEquals(1, entries.size());
-        assertEquals(Long.valueOf(99L), entries.get(0).getOrderId());
-    }
-
-    /** absent ≠ 0：key 不存在时必须 present=false 且 value=null */
-    @Test
-    void shouldMarkAbsentRedisValuesAsNotPresentInsteadOfZero() {
-        stubInventoryIncident();
-        when(valueOperations.get(anyString())).thenReturn(null);
-        when(stringRedisTemplate.hasKey(anyString())).thenReturn(false);
-        when(setOperations.isMember(anyString(), anyString())).thenReturn(false);
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        assertFalse(context.getRedis().getVoucherStock().getPresent());
-        assertNull(context.getRedis().getVoucherStock().getValue());
-        assertFalse(context.getRedis().getVoucherOrderedUsers().getPresent());
-        assertNull(context.getRedis().getVoucherOrderedUsers().getCardinality());
-        assertFalse(context.getRedis().getDirtyVouchers().getPresent());
-        assertNull(context.getRedis().getDirtyVouchers().getMemberCount());
-        assertFalse(context.getRedis().getDirtyVouchers().getContainsVoucher());
-    }
-
-    /** Redis 失败只让 redis 段降级，其它已计划数据源仍返回 */
-    @Test
-    void shouldKeepBuildingWhenRedisSourceFails() {
-        stubInventoryIncident();
-        when(valueOperations.get(anyString())).thenThrow(new RuntimeException("redis down"));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        assertNull(context.getRedis());
-        assertTrue(context.getContextQuality().getUnavailableSources().contains("redis"));
-        assertFalse(context.getContextQuality().getComplete());
-        assertNotNull(context.getDatabase());
-        assertNotNull(context.getMetrics());
-        assertNotNull(context.getIncident());
-    }
-
-    /** Redis 不可用时不得伪造 0 计数器 */
-    @Test
-    void shouldNotFabricateCountersWhenMetricsSourceFails() {
-        stubInventoryIncident();
-        stubRedisReads(true);
-        when(valueOperations.multiGet(anyList())).thenThrow(new RuntimeException("redis down"));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        assertNull(context.getMetrics());
-        assertTrue(context.getContextQuality().getUnavailableSources().contains("metrics"));
-        assertFalse(context.getContextQuality().getComplete());
-    }
-
-    /** counters 与 counter_presence 一一对应，缺失计数器如实标记 */
-    @Test
-    void shouldExposeCounterPresenceAlongsideCounters() {
-        stubInventoryIncident();
-        stubRedisReads(true);
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        Map<String, Double> counters = context.getMetrics().getCounters();
-        Map<String, Boolean> presence = context.getMetrics().getCounterPresence();
-        assertEquals(10, counters.size());
-        assertEquals(10, presence.size());
-        assertEquals(2.0d, counters.get("total_requests").doubleValue());
-        assertTrue(presence.get("total_requests"));
-        assertEquals(0.0d, counters.get("consume_error").doubleValue());
-        assertFalse(presence.get("consume_error"));
-    }
-
-    /** snapshot 按类型白名单投影：DEAD_LETTER 必须剔除 user_id */
-    @Test
-    void shouldProjectOnlyWhitelistedSnapshotFields() {
-        Incident incident = deadLetterIncident().setSnapshot(
-                "{\"message_id\":\"1-0\",\"voucher_id\":7,\"user_id\":3,\"order_id\":99,"
-                        + "\"failure_reason\":\"retry_exhausted\",\"unexpected_field\":\"x\"}");
-        stubIncident(incident, List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
-
-        IncidentContext context = builder.build(INCIDENT_ID);
         Map<String, Object> snapshot = context.getIncident().getDetectedSnapshot();
-
         assertNotNull(snapshot);
-        assertTrue(snapshot.containsKey("order_id"));
-        assertTrue(snapshot.containsKey("failure_reason"));
-        assertFalse(snapshot.containsKey("user_id"), "snapshot 白名单必须剔除 user_id");
-        assertFalse(snapshot.containsKey("unexpected_field"));
-        assertEquals("LATEST_DETECTION", context.getIncident().getDetectedSnapshotScope());
-    }
-
-    @Test
-    void shouldPreserveExplicitNullsInInventorySnapshotProjection() {
-        stubIncident(inventoryIncident().setSnapshot(
-                "{\"voucher_id\":13,\"redis_stock\":null,\"db_stock\":0,"
-                        + "\"deviation\":null,\"detected_at\":1790932584824}"), List.of());
-        stubRedisReads(true);
-
-        Map<String, Object> snapshot = builder.build(INCIDENT_ID).getIncident().getDetectedSnapshot();
-
         assertTrue(snapshot.containsKey("redis_stock"));
         assertNull(snapshot.get("redis_stock"));
         assertTrue(snapshot.containsKey("deviation"));
         assertNull(snapshot.get("deviation"));
-        assertEquals(0, snapshot.get("db_stock"));
+        // 白名单外的字段不得出现
+        assertFalse(snapshot.containsKey("user_id"));
     }
 
-    /** snapshot 解析失败只记 PARSE_ERROR，不影响其它字段 */
     @Test
-    void shouldRecordParseErrorWithoutLosingOtherIncidentFields() {
-        stubIncident(inventoryIncident().setSnapshot("{not-json"), List.of());
-        stubRedisReads(true);
+    void snapshotOnlyProjectsWhitelistedFields() {
+        stubIncident(IncidentType.DEAD_LETTER,
+                "{\"message_id\":\"m-1\",\"voucher_id\":7,\"order_id\":9,\"failure_reason\":\"retry_exhausted\","
+                        + "\"max_retry\":3,\"user_id\":123,\"internal_note\":\"secret\"}");
+        stubRedisHealthy();
+        stubDatabaseHealthy();
+        stubQueueHealthy();
+        stubConsumerHealthy();
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
-        assertNull(context.getIncident().getDetectedSnapshot());
-        assertEquals(Long.valueOf(INCIDENT_ID), context.getIncident().getIncidentId());
-        assertNotNull(context.getIncident().getTitle());
-        assertFalse(context.getContextQuality().getComplete());
-        IncidentContext.SourceError error = context.getContextQuality().getErrors().get(0);
-        assertEquals("incident", error.getSource());
-        assertEquals("PARSE_ERROR", error.getErrorType());
+        Map<String, Object> snapshot = context.getIncident().getDetectedSnapshot();
+        assertEquals("m-1", snapshot.get("message_id"));
+        assertEquals(3, snapshot.get("max_retry"));
+        // DEAD_LETTER 白名单刻意排除 user_id
+        assertFalse(snapshot.containsKey("user_id"));
+        assertFalse(snapshot.containsKey("internal_note"));
     }
 
-    /** errors 不得携带原始异常信息 */
+    // ==================== G. privacy ====================
+
     @Test
-    void shouldNotLeakRawExceptionMessageIntoErrors() {
-        stubInventoryIncident();
-        when(valueOperations.get(anyString()))
-                .thenThrow(new RuntimeException("super-secret-db-credential-detail"));
+    void recentOrdersNeverExposeUserIdOrVoucherId() throws Exception {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubRedisHealthy();
+        stubDatabaseHealthy();
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+        String json = mapper().writeValueAsString(context);
+
+        assertEquals(1, context.getDatabase().getRecentOrders().size());
+        assertFalse(json.contains("user_id"));
+        assertFalse(json.contains("userId"));
+        // voucher_id 在 recent_orders 内不重复出现（券维度已由 related_voucher_id 表达）
+        JsonNode recent = mapper().readTree(json)
+                .path("database").path("recent_orders").get(0);
+        assertEquals(2, recent.size());
+        assertTrue(recent.has("order_id"));
+        assertTrue(recent.has("create_time"));
+    }
+
+    // ==================== H. JSON contract ====================
+
+    @Test
+    void jsonContractIsSnakeCaseAndFreeOfRemovedSections() throws Exception {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubRedisHealthy();
+        stubDatabaseHealthy();
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
-        IncidentContext.SourceError error = context.getContextQuality().getErrors().get(0);
-        assertEquals("REDIS_ERROR", error.getErrorType());
-        assertEquals("redis read failed", error.getMessage());
-        assertFalse(error.getMessage().contains("super-secret"));
+        ObjectMapper mapper = mapper();
+        String json = mapper.writeValueAsString(context);
+        JsonNode root = mapper.readTree(json);
+
+        // 顶层只剩收敛后的字段
+        assertTrue(root.has("context_version"));
+        assertTrue(root.has("built_at"));
+        assertTrue(root.has("incident"));
+        assertTrue(root.has("redis"));
+        assertTrue(root.has("database"));
+        assertTrue(root.has("queue"));
+        assertTrue(root.has("consumer_health"));
+        assertTrue(root.has("unavailable_sources"));
+
+        // 已删除的段落/字段不得再出现
+        assertFalse(root.has("metrics"));
+        assertFalse(root.has("runtime"));
+        assertFalse(root.has("context_quality"));
+        assertFalse(json.contains("\"planned_sources\""));
+        // 注意：unavailable_sources 含 available_sources 子串，必须带引号断言
+        assertFalse(json.contains("\"available_sources\""));
+        assertFalse(json.contains("\"not_implemented_sources\""));
+        assertFalse(json.contains("truncations"));
+        assertFalse(json.contains("notes"));
+        assertFalse(json.contains("observed_at"));
+        assertFalse(json.contains("business_key"));
+        assertFalse(json.contains("recent_previous_incidents"));
+        assertFalse(json.contains("counter_presence"));
+        assertFalse(json.contains("stream_entry_id"));
+        assertFalse(json.contains("original_message_id"));
+
+        // 段内字段名 snake_case 正确
+        assertTrue(root.path("redis").has("stock"));
+        assertTrue(root.path("redis").path("stock").has("present"));
+        assertTrue(root.path("redis").has("ordered_user_count"));
+        assertTrue(root.path("redis").has("dirty"));
+        assertTrue(root.path("redis").has("mismatch_pending"));
+        assertTrue(root.path("database").has("voucher_exists"));
+        assertTrue(root.path("database").has("order_count"));
+        assertTrue(root.path("database").has("recent_orders"));
     }
 
-    /** 死信从最新端读取、按券过滤，并记录扫描上限截断（scanLimit+1 条才判定） */
     @Test
-    void shouldReadDeadLetterFromNewestEndAndRecordTruncation() {
-        stubIncident(deadLetterIncident(), List.of());
-        stubRedisReads(true);
-        stubEmptyQueue();
-
-        List<MapRecord<String, Object, Object>> records = new ArrayList<>();
-        // 第一条属于本券，其余属于其它券：应只保留本券
-        records.add(deadLetterRecord("1-0", "7", "99"));
-        for (int i = 1; i <= ContextConstants.DEAD_LETTER_SCAN_LIMIT; i++) {
-            records.add(deadLetterRecord(i + "-0", "8", "100"));
-        }
-        stubDeadLetterRecords(records);
+    void jsonContractKeepsExplicitNullsUnderNonNullGlobalInclusion() throws Exception {
+        stubIncident(IncidentType.INVENTORY_MISMATCH,
+                "{\"voucher_id\":7,\"redis_stock\":null,\"db_stock\":0,\"deviation\":null}");
+        stubRedisHealthy();
+        stubDatabaseHealthy();
 
         IncidentContext context = builder.build(INCIDENT_ID);
 
-        verify(streamOperations).reverseRange(anyString(), any(), any(Limit.class));
-        assertEquals(1, context.getQueue().getDeadLetterEntriesForVoucher().size());
-        assertEquals(Long.valueOf(99L), context.getQueue().getDeadLetterEntriesForVoucher().get(0).getOrderId());
-        assertEquals("NEWEST", context.getQueue().getDeadLetterStream().getScannedFrom());
-        assertTrue(context.getContextQuality().getTruncations().stream()
-                .anyMatch(t -> "dead_letter_scan".equals(t.getSource()) && Boolean.TRUE.equals(t.getTruncated())));
+        // 复刻 application.yaml 的全局 non_null 设置
+        ObjectMapper mapper = mapper();
+        JsonNode root = mapper.readTree(mapper.writeValueAsString(context));
+
+        // detected_snapshot 里显式 null 的 key 必须保留
+        JsonNode snapshot = root.path("incident").path("detected_snapshot");
+        assertTrue(snapshot.has("redis_stock"));
+        assertTrue(snapshot.get("redis_stock").isNull());
+        assertTrue(snapshot.has("deviation"));
+        assertTrue(snapshot.get("deviation").isNull());
+
+        // 段整体为 null 时仍必须输出该 key（未计划采集）
+        assertTrue(root.has("queue"));
+        assertTrue(root.path("queue").isNull());
     }
 
-    /** recent_orders 不输出 user_id，超过上限记录截断（N+1 条才判定） */
     @Test
-    void shouldExcludeUserIdFromRecentOrdersAndRecordTruncation() {
-        stubInventoryIncident();
-        stubRedisReads(true);
-        when(voucherOrderMapper.selectList(any()))
-                .thenReturn(orders(ContextConstants.RECENT_ORDERS_LIMIT + 1));
+    void incidentEvidenceCarriesNoSourceOrScopeFields() {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubRedisHealthy();
+        stubDatabaseHealthy();
 
         IncidentContext context = builder.build(INCIDENT_ID);
+        IncidentContext.IncidentEvidence evidence = context.getIncident();
 
-        IncidentContext.RecentOrder first = context.getDatabase().getRecentOrders().get(0);
-        assertEquals(Long.valueOf(0L), first.getOrderId());
-        assertEquals(ContextConstants.RECENT_ORDERS_LIMIT, context.getDatabase().getRecentOrders().size());
-        assertTrue(context.getContextQuality().getTruncations().stream()
-                .anyMatch(t -> "recent_orders".equals(t.getSource())));
+        assertEquals(INCIDENT_ID, evidence.getIncidentId());
+        assertEquals("INVENTORY_MISMATCH", evidence.getIncidentType());
+        assertEquals("HIGH", evidence.getSeverity());
+        assertEquals("OPEN", evidence.getStatus());
+        assertEquals(VOUCHER_ID, evidence.getRelatedVoucherId());
+        assertEquals(2, evidence.getOccurrenceCount());
     }
 
-    /** recent_previous_incidents 排除当前 Incident */
     @Test
-    void shouldExcludeCurrentIncidentFromRecentPreviousIncidents() {
-        Incident current = inventoryIncident();
-        Incident older = new Incident().setId(3L)
-                .setIncidentType(IncidentType.INVENTORY_MISMATCH)
-                .setStatus(IncidentStatus.RESOLVED)
-                .setSeverity(IncidentSeverity.HIGH)
-                .setOccurrenceCount(2);
-        stubIncident(current, List.of(current, older));
-        stubRedisReads(true);
+    void redisEvidenceNeverLeaksKeyNames() throws Exception {
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubRedisHealthy();
+        stubDatabaseHealthy();
 
         IncidentContext context = builder.build(INCIDENT_ID);
+        String json = mapper().writeValueAsString(context);
 
-        assertEquals(1, context.getIncident().getRecentPreviousIncidents().size());
-        assertEquals(Long.valueOf(3L), context.getIncident().getRecentPreviousIncidents().get(0).getIncidentId());
-    }
-
-    /** 历史读取失败时只降级该字段，不影响 incident 主字段 */
-    @Test
-    void shouldTolerateHistoryReadFailure() {
-        stubInventoryIncident();
-        stubRedisReads(true);
-        when(incidentService.listIncidents(any(), any(), any(), any()))
-                .thenThrow(new RuntimeException("db down"));
-
-        IncidentContext context = builder.build(INCIDENT_ID);
-
-        assertNull(context.getIncident().getRecentPreviousIncidents());
-        assertEquals(Long.valueOf(INCIDENT_ID), context.getIncident().getIncidentId());
-        assertFalse(context.getContextQuality().getComplete());
-    }
-
-    // ==================== fixtures ====================
-
-    private void stubIncident(Incident incident, List<Incident> history) {
-        when(incidentService.getIncident(INCIDENT_ID)).thenReturn(incident);
-        when(incidentService.listIncidents(any(), any(), any(), any())).thenReturn(history);
-    }
-
-    private void stubInventoryIncident() {
-        stubIncident(inventoryIncident(), List.of());
-    }
-
-    private void stubRedisReads(boolean present) {
-        when(valueOperations.get("seckill:stock:" + VOUCHER_ID)).thenReturn(present ? "1" : null);
-        when(valueOperations.get("seckill:reconcile:mismatch:" + VOUCHER_ID)).thenReturn(null);
-        when(stringRedisTemplate.hasKey("seckill:order:" + VOUCHER_ID)).thenReturn(present);
-        when(stringRedisTemplate.hasKey("seckill:voucher:dirty")).thenReturn(false);
-        when(stringRedisTemplate.hasKey("stream.orders")).thenReturn(false);
-        when(stringRedisTemplate.hasKey("stream.orders.dead")).thenReturn(false);
-        when(setOperations.size("seckill:order:" + VOUCHER_ID)).thenReturn(2L);
-        when(setOperations.isMember(anyString(), anyString())).thenReturn(false);
-    }
-
-    private void stubHealthyMetrics() {
-        List<String> values = new ArrayList<>(Collections.nCopies(10, null));
-        values.set(0, "2");   // total_requests
-        values.set(1, "2");   // reserve_success
-        values.set(4, "2");   // commit_success
-        values.set(9, "4");   // reconcile_mismatch
-        when(valueOperations.multiGet(anyList())).thenReturn(values);
-    }
-
-    private void stubEmptyQueue() {
-        when(stringRedisTemplate.hasKey("stream.orders")).thenReturn(true);
-        when(streamOperations.size("stream.orders")).thenReturn(4020L);
-        when(streamOperations.info("stream.orders")).thenReturn(streamInfo());
-        when(streamOperations.groups("stream.orders")).thenReturn(streamGroups());
-    }
-
-    private static StreamInfo.XInfoStream streamInfo() {
-        return StreamInfo.XInfoStream.fromList(Arrays.asList(
-                "length", 4020L,
-                "radix-tree-keys", 41L,
-                "radix-tree-nodes", 110L,
-                "last-generated-id", "1790159932387-0",
-                "first-entry", Arrays.asList("1783750775180-0", Arrays.asList("init", "1")),
-                "last-entry", Arrays.asList("1790159932387-0", Arrays.asList("init", "1")),
-                "groups", 1L));
-    }
-
-    private static StreamInfo.XInfoGroups streamGroups() {
-        List<Object> group = Arrays.asList(
-                "name", "g1",
-                "consumers", 15L,
-                "pending", 0L,
-                "last-delivered-id", "1790159932387-0",
-                "entries-read", 4020L,
-                "lag", 0L);
-        return StreamInfo.XInfoGroups.fromList(Collections.singletonList(group));
-    }
-
-    private static MapRecord<String, Object, Object> deadLetterRecord(String entryId, String voucherId, String orderId) {
-        Map<Object, Object> values = new HashMap<>();
-        values.put("voucherId", voucherId);
-        values.put("id", orderId);
-        values.put("originalMessageId", "1783750775180-0");
-        values.put("failureReason", "retry_exhausted");
-        return StreamRecords.mapBacked(values).<String>withStreamKey("stream.orders.dead")
-                .withId(RecordId.of(entryId));
-    }
-
-    /** 生成 count 条订单（都不含 user_id 输出，但实体上带 userId 以验证白名单） */
-    private static List<VoucherOrder> orders(int count) {
-        List<VoucherOrder> orders = new ArrayList<>();
-        for (int i = 0; i < count; i++) {
-            orders.add(new VoucherOrder().setId((long) i).setUserId(3L).setVoucherId(VOUCHER_ID)
-                    .setCreateTime(LocalDateTime.of(2026, 9, 23, 18, 0, i % 60)));
-        }
-        return orders;
-    }
-
-    /** 死信流存在 + 指定 reverseRange 结果 */
-    private void stubDeadLetterRecords(List<MapRecord<String, Object, Object>> records) {
-        when(stringRedisTemplate.hasKey("stream.orders.dead")).thenReturn(true);
-        when(streamOperations.size("stream.orders.dead")).thenReturn((long) records.size());
-        when(streamOperations.reverseRange(anyString(), any(), any(Limit.class))).thenReturn(records);
-    }
-
-    /** 生成 count 条死信记录（默认都属于其它券 voucherId=8） */
-    private static List<MapRecord<String, Object, Object>> deadLetterRecords(int count) {
-        List<MapRecord<String, Object, Object>> records = new ArrayList<>();
-        for (int i = 0; i < count; i++) {
-            records.add(deadLetterRecord(i + "-0", "8", String.valueOf(1000 + i)));
-        }
-        return records;
-    }
-
-    private static Incident inventoryIncident() {
-        return new Incident()
-                .setId(INCIDENT_ID)
-                .setIncidentType(IncidentType.INVENTORY_MISMATCH)
-                .setSeverity(IncidentSeverity.HIGH)
-                .setSource(IncidentSource.RECONCILE)
-                .setStatus(IncidentStatus.RESOLVED)
-                .setBusinessKey("voucher:" + VOUCHER_ID)
-                .setRelatedVoucherId(VOUCHER_ID)
-                .setOccurrenceCount(2)
-                .setTitle("Redis 与 MySQL 库存持续不一致（voucherId=7）")
-                .setDescription("连续两轮对账确认偏差")
-                .setFirstDetectedAt(LocalDateTime.of(2026, 9, 23, 18, 33, 50))
-                .setLastDetectedAt(LocalDateTime.of(2026, 9, 23, 18, 38, 55))
-                .setResolvedAt(LocalDateTime.of(2026, 9, 23, 18, 39, 1))
-                .setSnapshot("{\"db_stock\":1,\"deviation\":1,\"voucher_id\":7,"
-                        + "\"detected_at\":1790159934990,\"redis_stock\":0}");
-    }
-
-    private static Incident deadLetterIncident() {
-        return new Incident()
-                .setId(INCIDENT_ID)
-                .setIncidentType(IncidentType.DEAD_LETTER)
-                .setSeverity(IncidentSeverity.HIGH)
-                .setSource(IncidentSource.STREAM_CONSUMER)
-                .setStatus(IncidentStatus.OPEN)
-                .setBusinessKey("voucher:" + VOUCHER_ID)
-                .setRelatedVoucherId(VOUCHER_ID)
-                .setOccurrenceCount(1)
-                .setTitle("订单消息重试超限进入死信队列（voucherId=7）")
-                .setFirstDetectedAt(LocalDateTime.of(2026, 9, 23, 18, 33, 50))
-                .setLastDetectedAt(LocalDateTime.of(2026, 9, 23, 18, 33, 50))
-                .setSnapshot("{\"message_id\":\"1-0\",\"voucher_id\":7,\"order_id\":99,"
-                        + "\"failure_reason\":\"retry_exhausted\",\"detected_at\":1790159934990}");
-    }
-
-    private static Incident consumerUnhealthyIncident() {
-        return new Incident()
-                .setId(INCIDENT_ID)
-                .setIncidentType(IncidentType.CONSUMER_UNHEALTHY)
-                .setSeverity(IncidentSeverity.CRITICAL)
-                .setSource(IncidentSource.HEALTH_INDICATOR)
-                .setStatus(IncidentStatus.OPEN)
-                .setBusinessKey("stream.orders:g1")
-                .setOccurrenceCount(1)
-                .setTitle("秒杀消费者线程不可用")
-                .setFirstDetectedAt(LocalDateTime.of(2026, 9, 23, 18, 33, 50))
-                .setLastDetectedAt(LocalDateTime.of(2026, 9, 23, 18, 33, 50))
-                .setSnapshot("{\"health_status\":\"DOWN\",\"pending_count\":0,\"checked_at\":1790159934990}");
+        assertFalse(json.contains("seckill:stock:"));
+        assertFalse(json.contains("seckill:order:"));
+        assertFalse(json.contains("seckill:voucher:dirty"));
+        assertFalse(json.contains("seckill:reconcile:mismatch:"));
     }
 }

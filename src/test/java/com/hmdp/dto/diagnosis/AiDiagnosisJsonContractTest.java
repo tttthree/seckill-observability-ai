@@ -41,14 +41,14 @@ class AiDiagnosisJsonContractTest {
             .setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
     private static final Path FROZEN_FIXTURE = Paths.get(
-            "ai-diagnosis-service", "tests", "fixtures", "incident_context_v2_2_1.json");
+            "ai-diagnosis-service", "tests", "fixtures", "incident_context_v3_0.json");
 
     // ==================== 请求契约 ====================
 
     @Test
     void shouldWrapContextUnderSingleIncidentContextKey() throws Exception {
         IncidentContext context = new IncidentContext()
-                .setContextVersion("v2-2.1")
+                .setContextVersion("v3.0")
                 .setBuiltAt(Instant.parse("2026-09-23T14:00:00Z"));
 
         String json = objectMapper.writeValueAsString(
@@ -56,7 +56,7 @@ class AiDiagnosisJsonContractTest {
 
         JsonNode root = objectMapper.readTree(json);
         assertEquals(Set.of("incident_context"), fieldNames(root));
-        assertEquals("v2-2.1", root.get("incident_context").get("context_version").asText());
+        assertEquals("v3.0", root.get("incident_context").get("context_version").asText());
         // built_at 必须是 ISO-8601（JavaTimeModule 生效），而不是 epoch 数字
         assertTrue(root.get("incident_context").get("built_at").isTextual());
     }
@@ -86,7 +86,7 @@ class AiDiagnosisJsonContractTest {
     @Test
     void shouldSerializeLocalDegradationWithExplicitNulls() throws Exception {
         AiDiagnosisResult result = AiDiagnosisResult.localUnavailable(
-                "v2-2.1", 9001L, "INVENTORY_MISMATCH",
+                "v3.0", 9001L, "INVENTORY_MISMATCH",
                 "AI_SERVICE_UNREACHABLE", "INVALID_CONTEXT", 422, 2, 4012L);
 
         JsonNode node = objectMapper.readTree(objectMapper.writeValueAsString(result));
@@ -118,7 +118,7 @@ class AiDiagnosisJsonContractTest {
     void shouldAlwaysSerializeHttpStatusZeroWhenNoResponseReceived() throws Exception {
         // 未收到任何 HTTP 响应：http_status 必须是 0，不得为 null、不得缺字段
         AiDiagnosisResult result = AiDiagnosisResult.localUnavailable(
-                "v2-2.1", 9001L, "INVENTORY_MISMATCH",
+                "v3.0", 9001L, "INVENTORY_MISMATCH",
                 "AI_SERVICE_CONNECT_TIMEOUT", null, null, 2, 4012L);
 
         JsonNode node = objectMapper.readTree(objectMapper.writeValueAsString(result));
@@ -133,7 +133,7 @@ class AiDiagnosisJsonContractTest {
     void shouldSerializeHttpStatusWhenResponseReceived() throws Exception {
         AiDiagnosisResult result = new AiDiagnosisResult();
         result.setDiagnosisStatus(AiDiagnosisResult.STATUS_DIAGNOSED);
-        result.setContextVersion("v2-2.1");
+        result.setContextVersion("v3.0");
         result.setHttpStatus(200);
         result.setAttempts(1);
 
@@ -146,7 +146,7 @@ class AiDiagnosisJsonContractTest {
     @Test
     void shouldNotEmitPythonContractKeysMissingFromRealResponse() throws Exception {
         // 真实 DIAGNOSED 响应样例（字段名/类型来自 Python V2-3 实际输出）
-        String body = "{\"diagnosis_status\":\"DIAGNOSED\",\"context_version\":\"v2-2.1\","
+        String body = "{\"diagnosis_status\":\"DIAGNOSED\",\"context_version\":\"v3.0\","
                 + "\"incident_id\":9001,\"incident_type\":\"INVENTORY_MISMATCH\","
                 + "\"root_cause\":\"根因\",\"evidence\":[{\"path\":\"incident.status\","
                 + "\"observed\":\"RESOLVED\",\"note\":null}],"

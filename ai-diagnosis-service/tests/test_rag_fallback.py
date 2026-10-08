@@ -16,7 +16,7 @@ GOOD_LLM = {
     "root_cause_evidence_paths": ["incident.status"],
     "evidence": [
         {"path": "incident.status", "note": "事件已恢复"},
-        {"path": "redis.voucher_stock.value", "note": "构建时刻库存"},
+        {"path": "redis.stock.value", "note": "构建时刻库存"},
     ],
     "recommended_actions": [
         {"action": "人工核对库存", "rationale": "系统不自动覆盖", "evidence_paths": ["incident.status"]}

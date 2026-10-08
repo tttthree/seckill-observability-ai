@@ -17,8 +17,8 @@ keywords:
 summary: 新版本重试超限后隔离至死信 Stream，保留 Redis reservation（HELD）；人工核查后重放，HELD 不再次预占，历史无标记死信仍走重新预占。
 checks:
   - 确认死信条目的 failure_reason 是否为 retry_exhausted，并核对 snapshot 中记录的 max_retry（Context 不提供该消息的实际重试次数，不要假设）。
-  - 核对死信记录的 voucher_id / order_id 与数据库订单、Redis 库存及用户下单资格是否一致，核对保留预占与落库状态；不得假设进入 DLQ 已回补库存。
-  - 检查该券的死信条目在构建时刻是否仍然存在：存在表示仍待处置；已消失不等于业务恢复；核对 Redis/DB 库存均存在且一致。
+  - 用 queue.dead_letters[].order_id 与 database.recent_orders[].order_id / database.order_count 对照，核对订单是否已落库，并核对 Redis 库存与下单资格；不得假设进入 DLQ 已回补库存。
+  - 检查该券的死信条目在构建时刻是否仍然存在（queue.dead_letters 非空或 queue.dead_letter_count > 0）：存在表示仍待处置；已消失不等于业务恢复；核对 Redis/DB 库存均存在且一致。
   - 若准备重放，核实消息版本：HELD 仅重投、不再次扣库存或 SADD；历史无标记消息需重新校验库存和资格。
 do_not:
   - 禁止绕过一人一单与库存约束直接手工插入订单。

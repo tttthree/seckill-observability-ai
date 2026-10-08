@@ -1,0 +1,42 @@
+{
+  "context_version": "v3.0",
+  "built_at": "2026-01-15T08:00:00.000Z",
+  "incident": {
+    "incident_id": 9002,
+    "incident_type": "INVENTORY_MISMATCH",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "related_voucher_id": 7002,
+    "occurrence_count": 1,
+    "first_detected_at": "2026-01-15T16:10:00",
+    "last_detected_at": "2026-01-15T16:10:00",
+    "resolved_at": null,
+    "title": "Redis 与 MySQL 库存持续不一致（voucherId=7002）",
+    "description": "连续两轮确认 Redis stock missing；数据库库存=0，需人工介入，不自动补库存",
+    "detected_snapshot": {
+      "voucher_id": 7002,
+      "redis_stock": null,
+      "db_stock": 0,
+      "deviation": null,
+      "detected_at": 1768464600000
+    }
+  },
+  "redis": {
+    "stock": {
+      "present": false,
+      "value": null
+    },
+    "ordered_user_count": null,
+    "dirty": true,
+    "mismatch_pending": true
+  },
+  "database": {
+    "voucher_exists": true,
+    "stock": 0,
+    "order_count": 0,
+    "recent_orders": []
+  },
+  "queue": null,
+  "consumer_health": null,
+  "unavailable_sources": []
+}

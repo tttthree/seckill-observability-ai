@@ -8,21 +8,25 @@ import lombok.experimental.Accessors;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /**
- * V2-2 IncidentContext：围绕单个 Incident 的真实运行证据集合，作为 Java→Python 的稳定输入契约。
+ * IncidentContext v3.0：围绕单个 Incident 的真实运行证据集合，作为 Java→Python 的稳定输入契约。
  *
  * <p>
- * 契约约束（冻结）：
+ * 契约原则（冻结）：
  * </p>
  * <ul>
+ *   <li><b>只定义当前真正能采、且三类 Incident 诊断真正需要的字段</b>。没有可靠采集能力的信息
+ *       （结构化日志、消费者组 lag / entries_read）在 Schema 中<b>直接不存在</b>，
+ *       不以 null 或"未实现"标记出现；</li>
  *   <li>只放真实读取到的数据，不做任何 root cause 推断；</li>
  *   <li>每个嵌套段都声明 {@code @JsonInclude(ALWAYS)}，保证 nullable 字段真实序列化为 null；</li>
- *   <li>built_at / observed_at 使用 UTC {@link Instant}；Incident 的 {@link LocalDateTime} 原样输出（历史存储无时区）；</li>
- *   <li>未计划的数据源段为 null，且不出现在任何 quality 列表中；</li>
- *   <li>只有 planned 数据源才会出现在 planned/available/unavailable 列表中。</li>
+ *   <li>{@code unavailable_sources} 只记录<b>本次本应采集、但实际读取失败</b>的数据源名称；
+ *       未计划采集的数据源段为 null 且<b>不</b>出现在其中——两者语义必须可区分；</li>
+ *   <li>契约中不输出任何 Redis key 字符串：AI 不需要知道 key 名，只需要知道值是否存在。</li>
  * </ul>
  */
 @Data
@@ -36,16 +40,17 @@ public class IncidentContext {
     /** 本次 Context 构建时刻（UTC） */
     private Instant builtAt;
 
-    /** 未计划或不可用时为 null */
+    /** Incident 主证据；仅在 Incident 不存在时为 null（此时 Controller 返回 404） */
     private IncidentEvidence incident;
-    private MetricsEvidence metrics;
+
+    /** 未计划采集或读取失败时为 null */
     private RedisEvidence redis;
     private DatabaseEvidence database;
     private QueueEvidence queue;
     private ConsumerHealthEvidence consumerHealth;
-    private RuntimeEvidence runtime;
 
-    private ContextQuality contextQuality;
+    /** 本次本应采集但读取失败的数据源名称（如 "redis"）；未计划采集的不计入 */
+    private List<String> unavailableSources = new ArrayList<>();
 
     // ==================== incident ====================
 
@@ -55,15 +60,10 @@ public class IncidentContext {
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public static class IncidentEvidence {
 
-        /** 该段数据读取完成时刻（UTC） */
-        private Instant observedAt;
-
         private Long incidentId;
         private String incidentType;
         private String severity;
-        private String source;
         private String status;
-        private String businessKey;
         private Long relatedVoucherId;
         private Integer occurrenceCount;
 
@@ -76,7 +76,7 @@ public class IncidentContext {
         private String description;
 
         /**
-         * 按 IncidentType 白名单投影后的检测证据；解析失败或无证据时为 null。
+         * 按 IncidentType 白名单投影后的检测证据；无证据或解析失败时为 null。
          *
          * <p>
          * 契约：key 存在而 value=null 的 entry（如 redis_stock / deviation）必须真实输出为 {@code "key":null}。
@@ -86,43 +86,6 @@ public class IncidentContext {
          */
         @JsonInclude(value = JsonInclude.Include.ALWAYS, content = JsonInclude.Include.ALWAYS)
         private Map<String, Object> detectedSnapshot;
-
-        /** 固定为 LATEST_DETECTION：该快照只代表最近一次检测 */
-        private String detectedSnapshotScope;
-
-        /** 同一业务键下更早的 Incident（不含当前 Incident）；读取失败时为 null */
-        private List<PreviousIncident> recentPreviousIncidents;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class PreviousIncident {
-        private Long incidentId;
-        private String status;
-        private String severity;
-        private Integer occurrenceCount;
-        private LocalDateTime firstDetectedAt;
-        private LocalDateTime lastDetectedAt;
-        private LocalDateTime resolvedAt;
-    }
-
-    // ==================== metrics（只投影真实运行计数器） ====================
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class MetricsEvidence {
-
-        private Instant observedAt;
-
-        /** 10 个真实运行计数器（key 不存在时为 0.0，配合 counter_presence 判读） */
-        private Map<String, Double> counters;
-
-        /** 计数器 key 是否真实存在 */
-        private Map<String, Boolean> counterPresence;
     }
 
     // ==================== redis（券维度） ====================
@@ -133,46 +96,28 @@ public class IncidentContext {
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public static class RedisEvidence {
 
-        private Instant observedAt;
+        /** 库存 key 的真实读取结果：present=false 时 value 必须为 null，不得写成 0 */
+        private StockState stock;
 
-        private RedisScalarValue voucherStock;
-        private RedisCardinality voucherOrderedUsers;
-        private DirtyVouchers dirtyVouchers;
-        private RedisScalarValue reconcileMismatchMarker;
+        /** 当前券已获得下单资格的用户数（资格 Set 的基数） */
+        private Long orderedUserCount;
+
+        /** 当前券是否在 dirty（待对账）集合中 */
+        private Boolean dirty;
+
+        /** 当前券是否存在"两阶段对账首次发现不一致"标记 */
+        private Boolean mismatchPending;
     }
 
     @Data
     @Accessors(chain = true)
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class RedisScalarValue {
-        private String key;
-        /** key 是否存在：false 时 value 必须为 null，不得写成 0 */
+    public static class StockState {
+        /** 库存 key 是否存在；false 表示 Redis 中确实没有这个 key（真实故障证据） */
         private Boolean present;
+        /** present=false 时必须为 null */
         private Long value;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class RedisCardinality {
-        private String key;
-        private Boolean present;
-        private Long cardinality;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class DirtyVouchers {
-        private String key;
-        private Boolean present;
-        /** key 不存在时为 null（不写 0） */
-        private Long memberCount;
-        /** 成员判定对不存在的 key 语义明确，恒为布尔 */
-        private Boolean containsVoucher;
     }
 
     // ==================== database ====================
@@ -183,26 +128,17 @@ public class IncidentContext {
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public static class DatabaseEvidence {
 
-        private Instant observedAt;
+        /** 券在数据库中是否存在；false 时 stock 必须为 null */
+        private Boolean voucherExists;
 
         /** 券不存在时为 null */
-        private SeckillVoucherRow seckillVoucher;
-        private Long orderCountForVoucher;
-        /** 不含 user_id */
-        private List<RecentOrder> recentOrders;
-        private Integer recentOrdersLimit;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class SeckillVoucherRow {
-        private Long voucherId;
         private Integer stock;
-        private LocalDateTime beginTime;
-        private LocalDateTime endTime;
-        private LocalDateTime updateTime;
+
+        /** 该券的订单总数（含未提交完成的历史订单） */
+        private Long orderCount;
+
+        /** 最近订单，按创建时间倒序，最多 {@code RECENT_ORDERS_LIMIT} 条；不含 user_id */
+        private List<RecentOrder> recentOrders;
     }
 
     @Data
@@ -211,7 +147,6 @@ public class IncidentContext {
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public static class RecentOrder {
         private Long orderId;
-        private Long voucherId;
         private LocalDateTime createTime;
     }
 
@@ -223,53 +158,14 @@ public class IncidentContext {
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public static class QueueEvidence {
 
-        private Instant observedAt;
+        /** 消费者组 PEL 中尚未 ACK 的消息数（XPENDING） */
+        private Long pendingCount;
 
-        private StreamSummary mainStream;
-        /** 只保留聚合信息，不输出消费者明细列表 */
-        private ConsumerGroupSummary consumerGroup;
-        private DeadLetterStream deadLetterStream;
-        /** 仅 DEAD_LETTER 计划时采集；未计划时为 null */
-        private List<DeadLetterEntry> deadLetterEntriesForVoucher;
-    }
+        /** 死信 Stream 当前总条数（XLEN） */
+        private Long deadLetterCount;
 
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class StreamSummary {
-        private String key;
-        private Boolean exists;
-        private Long length;
-        private String firstEntryId;
-        private String lastEntryId;
-        private String lastGeneratedId;
-        private Long groupCount;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class ConsumerGroupSummary {
-        private String name;
-        private Long consumersTotal;
-        private Long pendingTotal;
-        private String lastDeliveredId;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class DeadLetterStream {
-        private String key;
-        private Boolean exists;
-        private Long length;
-        /** 固定为 NEWEST：从最新端读取 */
-        private String scannedFrom;
-        private Integer scannedLimit;
-        private Integer entriesFoundForVoucher;
+        /** 与当前券相关的死信条目（从最新端有界扫描后过滤） */
+        private List<DeadLetterEntry> deadLetters;
     }
 
     @Data
@@ -277,9 +173,8 @@ public class IncidentContext {
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public static class DeadLetterEntry {
-        private String streamEntryId;
-        private String originalMessageId;
-        private Long voucherId;
+        /** 原主 Stream 的消息 id（唯一 id，不额外暴露死信流自身的 entry id） */
+        private String messageId;
         private Long orderId;
         private String failureReason;
     }
@@ -292,75 +187,12 @@ public class IncidentContext {
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public static class ConsumerHealthEvidence {
 
-        private Instant observedAt;
-
+        /** 由 Actuator UP/DOWN 与内部 consumer_status 投影出的单一状态：HEALTHY / DEGRADED / DOWN */
         private String status;
-        private String consumerStatus;
-        private Boolean consumerAlive;
+
         private Long heartbeatAgeMs;
         private Long successHeartbeatAgeMs;
         private Long pendingCount;
         private String reason;
-    }
-
-    // ==================== runtime ====================
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class RuntimeEvidence {
-
-        private Instant observedAt;
-
-        private Long uptimeMs;
-        private Long heapUsedBytes;
-        private Integer threadCount;
-        private Integer availableProcessors;
-        private String javaVersion;
-    }
-
-    // ==================== context quality ====================
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class ContextQuality {
-
-        /** 只相对于本 Incident 的 planned_sources 判断；logs 未实现不影响该值 */
-        private Boolean complete;
-
-        private List<String> plannedSources;
-        private List<String> availableSources;
-        private List<String> unavailableSources;
-        private List<String> notImplementedSources;
-
-        private List<SourceError> errors;
-        private List<Truncation> truncations;
-        private List<String> notes;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class SourceError {
-        private String source;
-        /** {@link com.hmdp.enums.ContextSourceErrorType} 的名称 */
-        private String errorType;
-        /** 通用安全描述，不含原始异常信息 */
-        private String message;
-    }
-
-    @Data
-    @Accessors(chain = true)
-    @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    @JsonInclude(JsonInclude.Include.ALWAYS)
-    public static class Truncation {
-        private String source;
-        private Integer limit;
-        private Integer returned;
-        private Boolean truncated;
     }
 }

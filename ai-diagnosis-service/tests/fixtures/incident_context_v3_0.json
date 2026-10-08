@@ -21,7 +21,15 @@
       "detected_at": 1768464000000
     }
   },
-  "redis": null,
+  "redis": {
+    "stock": {
+      "present": true,
+      "value": 1
+    },
+    "ordered_user_count": 2,
+    "dirty": true,
+    "mismatch_pending": true
+  },
   "database": {
     "voucher_exists": true,
     "stock": 2,
@@ -39,7 +47,5 @@
   },
   "queue": null,
   "consumer_health": null,
-  "unavailable_sources": [
-    "redis"
-  ]
+  "unavailable_sources": []
 }

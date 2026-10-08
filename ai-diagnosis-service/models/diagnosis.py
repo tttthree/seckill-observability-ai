@@ -112,9 +112,8 @@ class RecommendedAction(_StrictModel):
 class EvidenceValidation(_StrictModel):
     """证据回校验统计。冻结不变量：submitted == accepted + dropped + over_limit。
 
-    - accepted  ：合法、唯一、通过全部语义闸门且进入最终 evidence 的条目数；
-    - dropped   ：被校验拒绝的条目（path 语法非法 / path 不存在 / duplicate path /
-                  metrics.counters.<name> 的 counter_presence 不严格为 true）；
+    - accepted  ：合法、唯一且进入最终 evidence 的条目数；
+    - dropped   ：被校验拒绝的条目（path 语法非法 / path 不存在 / duplicate path）；
     - over_limit：条目本身通过全部校验，但因 max_evidence_items 上限未进入最终 evidence（不是错误）。
     """
 
