@@ -1,6 +1,7 @@
 package com.hmdp.dto.context;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -17,9 +18,11 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -124,5 +127,47 @@ class IncidentContextJsonContractTest {
 
         assertFalse(json.contains("user_id"), json);
         assertFalse(json.contains("userId"), json);
+    }
+
+    /**
+     * 回归：detected_snapshot 是历史检测证据，Map 中 key 存在而 value=null 的 entry
+     * （redis_stock / deviation）必须在最终 JSON 里显式输出，不能被全局 NON_NULL 的 Map content 语义吞掉。
+     * <p>
+     * 断言针对真实 JSON 文本与解析后的 JsonNode，只验证 Java 内存 Map 不足以覆盖该 bug。
+     */
+    @Test
+    void shouldPreserveExplicitNullValuesInDetectedSnapshot() throws Exception {
+        LinkedHashMap<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("voucher_id", 13);
+        snapshot.put("redis_stock", null);
+        snapshot.put("db_stock", 0);
+        snapshot.put("deviation", null);
+
+        IncidentContext context = new IncidentContext()
+                .setContextVersion("v2-2.1")
+                .setIncident(new IncidentEvidence()
+                        .setIncidentId(10L)
+                        .setIncidentType("INVENTORY_MISMATCH")
+                        .setDetectedSnapshot(snapshot));
+
+        String json = objectMapper.writeValueAsString(context);
+
+        JsonNode root = objectMapper.readTree(json);
+        JsonNode detectedSnapshot = root.path("incident").path("detected_snapshot");
+
+        assertTrue(detectedSnapshot.isObject(), json);
+        // key 本身必须存在，而不是"反序列化拿不到值所以当成 null"
+        assertTrue(detectedSnapshot.has("voucher_id"), json);
+        assertEquals(13, detectedSnapshot.get("voucher_id").asInt(), json);
+        assertTrue(detectedSnapshot.has("redis_stock"), json);
+        assertTrue(detectedSnapshot.get("redis_stock").isNull(), json);
+        assertTrue(detectedSnapshot.has("deviation"), json);
+        assertTrue(detectedSnapshot.get("deviation").isNull(), json);
+        assertTrue(detectedSnapshot.has("db_stock"), json);
+        assertEquals(0, detectedSnapshot.get("db_stock").asInt(), json);
+        // 最直接的证据：原始 JSON 文本里必须显式出现这些 key
+        assertTrue(json.contains("\"redis_stock\":null"), json);
+        assertTrue(json.contains("\"deviation\":null"), json);
+        assertTrue(json.contains("\"db_stock\":0"), json);
     }
 }

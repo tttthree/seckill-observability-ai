@@ -75,7 +75,16 @@ public class IncidentContext {
         private String title;
         private String description;
 
-        /** 按 IncidentType 白名单投影后的检测证据；解析失败或无证据时为 null */
+        /**
+         * 按 IncidentType 白名单投影后的检测证据；解析失败或无证据时为 null。
+         *
+         * <p>
+         * 契约：key 存在而 value=null 的 entry（如 redis_stock / deviation）必须真实输出为 {@code "key":null}。
+         * 全局 {@code spring.jackson.default-property-inclusion=non_null} 会同时作用于 Map 的 content，
+         * 类级 {@code @JsonInclude(ALWAYS)} 不覆盖 content，故字段级同时声明 value/content 的 ALWAYS。
+         * </p>
+         */
+        @JsonInclude(value = JsonInclude.Include.ALWAYS, content = JsonInclude.Include.ALWAYS)
         private Map<String, Object> detectedSnapshot;
 
         /** 固定为 LATEST_DETECTION：该快照只代表最近一次检测 */
