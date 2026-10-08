@@ -50,9 +50,6 @@ seckill:
     fixed-delay-ms: 300000
     fallback-delay-ms: 1800000
     fallback-limit: 100
-  load-model:
-    concurrency: 2000
-    stock: 400
   pending-handler:
     enabled: true
     interval-ms: 5000
@@ -61,10 +58,6 @@ seckill:
     grace-period-ms: 5000
   sentinel:
     metrics-qps: 20
-    ai-analyze-qps: 1
-  ai:
-    baseline-enabled: true
-    baseline-key: seckill:metrics:baseline
   incident:
     # 故障事件层：统一记录对账偏差、死信、消费者不健康
     enabled: true

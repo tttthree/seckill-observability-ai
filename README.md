@@ -117,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File scripts/regression.ps1 `
   -AdminToken $env:ADMIN_TOKEN
 ```
 
-脚本验证验证码登录、秒杀券创建、Lua 预占、重复请求拦截、Stream 异步落库、死信隔离与重放、库存对账、指标采集和 AI 诊断入口。配置有效的 `DEEPSEEK_API_KEY` 后可增加 `-RequireAiDiagnosis`。
+脚本验证验证码登录、秒杀券创建、Lua 预占、重复请求拦截、Stream 异步落库、死信隔离与重放、库存对账和运行指标采集。脚本不调用外部 AI 服务。
 
 JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存，线程在 10 秒 Ramp-up 内逐步启动。完整准备、执行命令与参数见 [benchmark/README.md](benchmark/README.md)。
 
@@ -127,8 +127,7 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 |---|---|---|
 | POST | `/voucher-order/seckill/{id}` | Lua 资格预占 |
 | GET | `/voucher-order/seckill/{id}/status` | 查询异步订单状态 |
-| GET | `/metrics/seckill` | 获取结构化秒杀指标 |
-| GET | `/metrics/ai/analyze` | 触发 AI 辅助诊断 |
+| GET | `/metrics/seckill` | 获取秒杀运行指标 |
 | GET | `/admin/incidents` | 查询故障事件列表（支持 status/type/voucherId/limit） |
 | GET | `/admin/incidents/{incidentId}` | 查询单个故障事件详情 |
 | GET | `/admin/incidents/{incidentId}/context` | 实时构建该故障的 IncidentContext（V2-2） |

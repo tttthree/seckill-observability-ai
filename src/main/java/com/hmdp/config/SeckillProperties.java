@@ -23,17 +23,11 @@ public class SeckillProperties {
     /** 对账配置 */
     private Reconcile reconcile = new Reconcile();
 
-    /** 压测模型配置（AI 诊断参考值） */
-    private LoadModel loadModel = new LoadModel();
-
     /** Pending 独立处理器配置 */
     private PendingHandler pendingHandler = new PendingHandler();
 
-    /** Sentinel 防刷配置（仅 AI/指标接口） */
+    /** Sentinel 防刷配置（仅指标接口） */
     private Sentinel sentinel = new Sentinel();
-
-    /** AI 诊断配置 */
-    private Ai ai = new Ai();
 
     /** 故障事件（Incident）配置 */
     private Incident incident = new Incident();
@@ -57,12 +51,6 @@ public class SeckillProperties {
     }
 
     @Data
-    public static class LoadModel {
-        private int concurrency = 2000;
-        private int stock = 400;
-    }
-
-    @Data
     public static class PendingHandler {
         /** 是否启用独立 Pending 处理器 */
         private boolean enabled = true;
@@ -80,16 +68,6 @@ public class SeckillProperties {
     public static class Sentinel {
         /** 指标接口 QPS */
         private int metricsQps = 20;
-        /** AI 诊断接口 QPS */
-        private int aiAnalyzeQps = 1;
-    }
-
-    @Data
-    public static class Ai {
-        /** 是否启用历史基线对比 */
-        private boolean baselineEnabled = true;
-        /** Redis 中保存基线的 Hash key */
-        private String baselineKey = "seckill:metrics:baseline";
     }
 
     @Data

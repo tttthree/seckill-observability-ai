@@ -243,51 +243,9 @@ UNIQUE KEY uk_incident_open (open_key)
 
 `queue.consumer_group` 只包含 `name / consumers_total / pending_total / last_delivered_id`，**不提供 `lag` 与 `entries_read`**：spring-data-redis 2.7.18 的 `XInfoGroup` 未暴露这两个字段，而 `RedisConnection.execute` 在 Lettuce 下使用 `ByteArrayOutput`，无法解码含整数的嵌套数组回复（实测 `UnsupportedOperationException`）。既然无法在真实环境稳定取得，就不把永久为 `null` 的字段冻结进 V2-3 契约；该说明同时写入 `context_quality.notes`，避免下游误以为数据缺失。
 
-## 9. AI 诊断（基于全局指标）
+## 9. AI 诊断（V2-3 结构化诊断服务）
 
-Java 侧原有的指标诊断链路（`GET /metrics/ai/analyze`，保持不变）：
-
-DeepSeek API Key 或地址未配置时，服务直接返回本地 `UNKNOWN` 降级结果，不向外部发送运行指标。
-
-`MetricsServiceImpl` 将数据组织为：
-
-```text
-运行时计数
-   + 理论负载模型
-   + 系统能力比率
-   + 业务结果
-   + 链路漏斗
-   + 消费者健康
-   + 历史基线
-          |
-          v
-结构化 JSON Prompt
-          |
-          v
-DeepSeek
-          |
-          v
-primary_status
-key_symptoms
-causal_chains
-reason
-suggestion
-```
-
-主状态包括：
-
-- `NORMAL`：业务结果符合预期且基础设施正常
-- `SATURATED`：达到库存或容量边界
-- `DEGRADED`：预占到落库转化下降
-- `INFRA_FAIL`：Redis、数据库或消费者出现明确异常
-- `CRITICAL`：系统大面积失败或不可用
-- `UNKNOWN`：指标不足、AI 服务不可用或证据不足
-
-Prompt 强制要求每条结论引用输入指标，库存耗尽和重复下单被视为业务限制，而不是基础设施故障。
-
-## 10. AI 诊断（V2-3 结构化诊断服务）
-
-Java 侧原有的 `GET /metrics/ai/analyze`（`AiAnalyzeServiceImpl`）是基于**全局指标**的诊断，保持不变；V2-3 新增一条独立的、基于**单个 IncidentContext** 的诊断链路：
+V2-3 的诊断链路基于**单个 IncidentContext**：
 
 ```text
 V2-2 IncidentContextBuilder
@@ -303,7 +261,7 @@ DeepSeek（OpenAI 兼容，单次调用、无 retry）
 JSON 解析 → evidence.path 回校验（observed 取 Context 真实值）→ DiagnosisResult
 ```
 
-### 10.1 边界
+### 9.1 边界
 
 - 只读：不连 Redis/MySQL、不执行任何运维动作、不 resolve Incident；
 - 不修改 V2-1/V2-2 冻结契约；契约升级必须通过 `context_version` 显式升版（输入模型 `extra="forbid"`）；

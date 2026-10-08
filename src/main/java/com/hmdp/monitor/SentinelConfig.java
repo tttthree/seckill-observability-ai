@@ -13,7 +13,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Sentinel 规则：仅保护 AI/指标接口，秒杀接口不限流（脉冲流量由 Redis Lua 竞争）。
+ * Sentinel 规则：仅保护指标接口，秒杀接口不限流（脉冲流量由 Redis Lua 竞争）。
+ * <p>
+ * Incident 诊断接口的限流规则不在这里：它由
+ * {@link com.hmdp.config.AiDiagnosisConfig} 以合并既有规则的方式单独加载。
  *
  */
 @Slf4j
@@ -21,7 +24,6 @@ import java.util.List;
 public class SentinelConfig {
 
     public static final String RESOURCE_METRICS = "metrics";
-    public static final String RESOURCE_AI_ANALYZE = "ai-analyze";
 
     @Resource
     private SeckillProperties seckillProperties;
@@ -36,15 +38,7 @@ public class SentinelConfig {
         metricsRule.setCount(seckillProperties.getSentinel().getMetricsQps());
         rules.add(metricsRule);
 
-        FlowRule aiRule = new FlowRule();
-        aiRule.setResource(RESOURCE_AI_ANALYZE);
-        aiRule.setGrade(RuleConstant.FLOW_GRADE_QPS);
-        aiRule.setCount(seckillProperties.getSentinel().getAiAnalyzeQps());
-        rules.add(aiRule);
-
         FlowRuleManager.loadRules(rules);
-        log.info("Sentinel 防刷规则加载: 指标 QPS={}, AI QPS={}",
-                seckillProperties.getSentinel().getMetricsQps(),
-                seckillProperties.getSentinel().getAiAnalyzeQps());
+        log.info("Sentinel 防刷规则加载: 指标 QPS={}", seckillProperties.getSentinel().getMetricsQps());
     }
 }

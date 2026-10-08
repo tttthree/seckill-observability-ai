@@ -7,8 +7,7 @@ param(
     [string]$RedisHost = "127.0.0.1",
     [int]$RedisPort = 6379,
     [int]$RedisDatabase = 0,
-    [string]$RedisPassword = "",
-    [switch]$RequireAiDiagnosis
+    [string]$RedisPassword = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -104,7 +103,7 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 Assert-True ($orderStatus.data.status -eq "SUCCESS") "order was not committed within 6 seconds"
 
-Write-Host "[6/8] Exercising dead-letter quarantine and replay"
+Write-Host "[6/7] Exercising dead-letter quarantine and replay"
 $suffix = [Guid]::NewGuid().ToString("N")
 $sourceStream = "regression:source:$suffix"
 $deadStream = "regression:dead:$suffix"
@@ -154,7 +153,7 @@ finally {
     Invoke-Redis -Command @("DEL", $sourceStream, $deadStream, $targetStream, $stockKey, $orderedKey, $retryKey, $recoveryKey) | Out-Null
 }
 
-Write-Host "[7/8] Triggering reconciliation and validating metrics"
+Write-Host "[7/7] Triggering reconciliation and validating metrics"
 $reconcile = Invoke-JsonApi -Method Post -Path "/admin/reconcile/trigger" -Headers $adminHeaders -Body $null
 Assert-True ($reconcile.success -eq $true) "manual reconciliation failed"
 $metrics = Invoke-JsonApi -Method Get -Path "/metrics/seckill" -Body $null
@@ -162,11 +161,4 @@ Assert-True ([double]$metrics.runtime_metrics.total_requests -ge 2) "request met
 Assert-True ([double]$metrics.runtime_metrics.reserve_success -ge 1) "reservation metric was not collected"
 Assert-True ([double]$metrics.runtime_metrics.order_success -ge 1) "database commit metric was not collected"
 
-Write-Host "[8/8] Invoking AI diagnosis"
-$diagnosis = Invoke-JsonApi -Method Get -Path "/metrics/ai/analyze" -Body $null
-Assert-True (-not [string]::IsNullOrWhiteSpace([string]$diagnosis.primary_status)) "AI diagnosis returned no status"
-if ($RequireAiDiagnosis) {
-    Assert-True ($diagnosis.primary_status -ne "UNKNOWN") "AI diagnosis did not complete successfully"
-}
-
-Write-Host "Regression passed: login, voucher creation, reservation, asynchronous commit, quarantine, replay, reconciliation, metrics and diagnosis."
+Write-Host "Regression passed: login, voucher creation, reservation, duplicate rejection, asynchronous commit, quarantine, replay, reconciliation and runtime metrics."
