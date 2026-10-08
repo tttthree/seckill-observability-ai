@@ -176,7 +176,7 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 
 `/admin/incidents/{id}/context` 实时构建、不落库，只收集真实读到的证据，**不做任何根因推断**；按 IncidentType 严格计划采集范围，单个数据源失败只降级该段并记入 `unavailable_sources`，HTTP 仍返回 200；Incident 不存在返回 404。输出契约见 [ARCHITECTURE.md](ARCHITECTURE.md) §8。
 
-`/admin/incidents/{id}/diagnosis` 复用同一个 Context Builder，再调用独立 Python 诊断服务返回**结构化诊断**（根因 / 可回溯证据 / 人工建议）。AI 侧不可用、超时或响应非法时，Java 侧**有界失败**并返回 `diagnosis_status=UNAVAILABLE` + `error_code`：`AI_*` 前缀由 Java 集成层生成（如 `AI_SERVICE_UNREACHABLE` / `AI_SERVICE_READ_TIMEOUT` / `AI_RATE_LIMITED`），其余为 Python 原样返回（如 `MODEL_NOT_CONFIGURED`）；`error_origin` 明确区分两者。**不会伪造成 DIAGNOSED**，也不影响秒杀交易链路。契约、超时 / 重试 / 限流策略见 [ARCHITECTURE.md](ARCHITECTURE.md) §11。
+`/admin/incidents/{id}/diagnosis` 复用同一个 Context Builder，再调用独立 Python 诊断服务返回**结构化诊断**（根因 / 可回溯证据 / 人工建议）。AI 侧不可用、超时或响应非法时，Java 侧**有界失败**并返回 `diagnosis_status=UNAVAILABLE` + `error_code`：`AI_*` 前缀由 Java 集成层生成（如 `AI_SERVICE_UNREACHABLE` / `AI_SERVICE_READ_TIMEOUT` / `AI_RATE_LIMITED`），其余为 Python 原样返回（如 `MODEL_NOT_CONFIGURED`）；`error_origin` 明确区分两者。**不会伪造成 DIAGNOSED**，也不影响秒杀交易链路。契约、响应校验、超时 / 重试 / 限流策略见 [ARCHITECTURE.md](ARCHITECTURE.md) §10.2～§10.4。
 
 用户接口通过 `authorization: <token>` 传递身份；运维写接口与故障事件查询通过 `X-Admin-Token: <ADMIN_TOKEN>` 鉴权。
 
