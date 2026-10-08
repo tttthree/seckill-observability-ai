@@ -144,11 +144,9 @@ Resume-Lite **不提供**自动重放、自动补偿或自动恢复判定，也�
 | 数据库超卖 | `stock > 0` 条件更新 |
 | 消费进程异常 | Redis Stream PEL 与 `XCLAIM` |
 | 重复隔离 | 隔离脚本以 `XACK` 结果作为执行门槛，始终保留预占 |
-| 长期库存偏差 | dirty-set 驱动的库存对账；missing 不等于 0，两阶段确认与人工告警 |
+| 长期库存偏差 | 脏券快速路径 + 低频有界分页兜底；missing 不等于 0，两阶段确认与人工告警 |
 
-对账采用 **dirty-set 驱动**：订单变更时把券标记为 dirty，定时任务只比较这些券的 Redis 与 MySQL 库存。为避免异步提交窗口（Redis Lua 预占早于 MySQL 提交）造成瞬时误报，**连续两轮不一致**才记录 `reconcile_mismatch` 并上报 Incident。对账不会自动覆盖任何一侧库存。
-
-**明确边界**：不周期性扫描整个 `tb_seckill_voucher` 表。因此"绕过本应用直接修改数据库"造成的漂移不在当前原型的一致性检测范围内；本应用自身的库存变更路径都会标记 dirty。
+对账不会自动覆盖 Redis 或 MySQL 库存。因为消费中的短暂差异是正常状态，直接覆盖可能放大错误；系统只在连续两轮不一致时记录 `reconcile_mismatch` 并告警。
 
 ## 6. 监控模型
 
@@ -508,7 +506,7 @@ tb_incident
 - stats.activity：ACTIVE / STOPPED / NOT_STARTED / ENDED / METADATA_MISSING。旧券通过管理员 resume 初始化元数据；缺库存不自动恢复。
 - 死信隔离始终保留 Redis 预占与下单资格，且不提供重放入口。此策略主动牺牲故障期间可售库存，换取不因晚提交自动释放预占；取消和退库存流程不在本轮实现范围。
 - DEAD_LETTER 事件不做自动恢复：系统无法证明这批死信已被正确处理，因此保持 OPEN 交由人工核查，也没有人工 resolve 接口。
-- 对账只有 dirty-set 一条路径：订单变更时标脏，定时任务只检查已标脏的券；不做周期性整表扫描。新增交易路径若忘了标脏不会被自动发现，这是当前原型的已知边界。
+- dirty set 保持主路径；fallback-delay-ms 默认 1800000，fallback-limit 默认 100、硬限制 [1,1000]。DB 按 voucher_id 升序游标分页，标脏完成后推进游标，末页回到 0；仅发现并标脏，不改库存。大数据量下完整覆盖需要多轮。
 - Redis stock missing 保留 null 的 redis_stock/deviation 快照及明确描述，两阶段上报。
 - 仅主消费循环刷新 main heartbeat。导出 seckill_consumer_pending_count；ConsumerStalled 要求 health==1 AND pending>0 AND success_age>60000。
 
