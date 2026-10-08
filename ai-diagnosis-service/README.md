@@ -1,7 +1,7 @@
-# V2-3 / V2-5 / V2-6 AI Diagnosis Service
+# AI Diagnosis Service
 
-接收 **V2-2 冻结的 `IncidentContext` JSON**，调用 DeepSeek 输出**结构化诊断结果**；
-V2-5 起额外注入**人工评审的 Runbook 通用知识**（RAG，确定性检索，见下文）。
+接收 **`IncidentContext` v3.0 JSON**，注入**人工评审的 Runbook 通用知识**（确定性检索），
+调用 DeepSeek 输出**结构化诊断结果**。
 
 边界（冻结）：
 
@@ -10,10 +10,8 @@ V2-5 起额外注入**人工评审的 Runbook 通用知识**（RAG，确定性�
   `recommended_actions(action,rationale)` / `insufficient_reason`），
   其余元数据（`observed`、`requires_human`、`evidence_validation`、`model`、时间、`error_code`）全部由本服务生成；
 - 模型侧失败一律返回 **HTTP 200 + `diagnosis_status=UNAVAILABLE`**，让 Java 调用方无需为 AI 可用性写异常分支；
-- 单次调用、**不做 retry/backoff**（Java V2-4 负责有界 retry / 限流，未实现熔断器）；
-- Runbook 只是**通用知识**，不是本次事故的事实；`evidence[].path` **只能**引用 IncidentContext；
-- V2-6：`root_cause` / 每条 action 必须用内部 citation 挂到同一次输出的 `evidence[].path` 上，
-  无有效 citation 时 root_cause 降级为 `INSUFFICIENT_EVIDENCE`、action 被丢弃（citation 不对外输出）。
+- 单次调用、**不做 retry/backoff**（Java 集成层负责有界重试与限流，未实现熔断器）；
+- Runbook 只是**通用知识**，不是本次事故的事实；`evidence[].path` **只能**引用 IncidentContext。
 
 ## 运行
 
@@ -32,7 +30,7 @@ py -3.12 -m venv .venv
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/healthz` | 服务与配置状态（`model_configured` + V2-5 KB 状态；绝不返回凭据与知识内容） |
+| GET | `/healthz` | 服务与配置状态（`model_configured` + KB 状态；绝不返回凭据与知识内容） |
 | POST | `/api/v1/diagnosis` | 入参 `{"incident_context": {...}}`，返回 `DiagnosisResult` |
 
 请求示例：
@@ -63,7 +61,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
   "error_code": null,
   "evidence_validation": {"submitted": 2, "accepted": 2, "dropped": 0, "over_limit": 0},
   "model": "deepseek-flash",
-  "prompt_version": "v3.0",
+  "prompt_version": "v3.1",
   "diagnosed_at": "2026-01-15T08:00:12.345Z",
   "elapsed_ms": 4210
 }
@@ -112,7 +110,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/diagnosis \
 - 契约中已删除的字段（如 `metrics.*`）自然不可解析，因此不需要额外的计数器闸门；
 - `DIAGNOSED` 但没有任何可回溯证据 → 强制降级为 `INSUFFICIENT_EVIDENCE`。
 
-### `evidence_validation`：dropped 与 over_limit 的区别（V2-3.3）
+### `evidence_validation`：dropped 与 over_limit 的区别
 
 模型提交的**每一条** `evidence` 都会走完整校验链（`parse → resolve → duplicate`），
 **不会因为数量达到上限而提前停止校验**。三种去向互斥且穷尽，冻结全局不变量：
@@ -125,7 +123,7 @@ submitted == accepted + dropped + over_limit
 |---|---|
 | `submitted` | 模型提交的 evidence 总条数 |
 | `accepted` | 通过全部校验、并进入最终 `evidence` 的条数 |
-| `dropped` | **被校验拒绝**：path 语法非法 / path 不存在 / duplicate path / `counter_presence` 不严格为 true |
+| `dropped` | **被校验拒绝**：path 语法非法 / path 不存在 / duplicate path |
 | `over_limit` | **条目本身完全合法**，但 `accepted` 已达 `MAX_EVIDENCE_ITEMS`，因此未进入最终 `evidence`（**不是错误**） |
 
 因此：
@@ -135,7 +133,7 @@ submitted == accepted + dropped + over_limit
 - 上限不改变判定语义：达到上限后提交的非法条目仍计入 `dropped`（不会因为"超限"而免检）；
   重复路径也以"已通过 parse/resolve 的路径"为准，超限区间内的重复同样计入 `dropped`。
 
-## Runbook KB 与 RAG（V2-5）
+## Runbook 知识检索
 
 在 IncidentContext 之外，服务还会注入**通用运维知识**（Runbook），帮助模型组织排查步骤；
 知识**不是**本次事故的事实，`evidence` 仍然只能引用 IncidentContext（结构上由 validator 保证）。
@@ -152,7 +150,7 @@ updated_at: 2026-09-24
 incident_types: [INVENTORY_MISMATCH] # 必须声明，取值 ∈ IncidentType
 match_signals:                       # 可选；取自闭集信号词表（拼错该条即 invalid）
   - snapshot:deviation_positive
-  - counter_present:reconcile_mismatch
+  - redis:mismatch_pending
 keywords: [库存, 对账, deviation]     # 自由文本兜底匹配，≤20 个
 summary: 一句话适用场景（≤200 字）     # ↓ 仅这三个字段进入 prompt
 checks: [ ... ≤8 条，每条 ≤200 字 ... ]
@@ -172,7 +170,7 @@ references: [ARCHITECTURE.md#5-一致性边界]   # 仅人工溯源，不投喂�
    超出时**整条丢弃**低排名条目（不截断正文）；
 5. 无命中时注入显式空标记 `（本次未检索到相关知识条目）`，让模型知道"确实没有知识"，而不是以为被省略；
 6. 信号阈值严格复用项目既有定义：`pending_count > 1000`、心跳 `> 30000ms`、成功消费心跳 `> 60000ms`；
-   项目没有阈值语义的字段（如堆内存）**不造信号**。
+   项目没有阈值语义的字段**不造信号**。
 
 ### RAG 降级边界
 
@@ -203,7 +201,7 @@ references: [ARCHITECTURE.md#5-一致性边界]   # 仅人工溯源，不投喂�
 
 > 测试用临时 KB 目录位于服务目录下的 `.pytest-tmp/`（已 gitignore）：沙箱环境不允许写系统临时区。
 
-`tests/fixtures/` 中的样本由 V2-2 真实 smoke 捕获后**脱敏**生成
+`tests/fixtures/` 中的样本由真实运行捕获后**脱敏**生成
 （业务 id 改号、时间与 stream id 替换为合成值），保留结构与语义，不含本地运行细节。
 
 证据回校验证明的是"模型引用的数据真实存在"，不是"自然语言根因被形式化证明"；`evidence_validation` 继续冻结 `submitted = accepted + dropped + over_limit`。

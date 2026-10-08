@@ -19,38 +19,50 @@
 ## 2. 系统结构
 
 ```text
-                         +--------------------+
-                         | dashboard.html     |
-                         +---------+----------+
-                                   |
-              +--------------------+--------------------+
-              | Spring Boot 8081                        |
-              |                                         |
-              | User / Voucher / VoucherOrder API       |
-              | Admin API / Metrics API / AI API        |
-              +------+------------------+---------------+
-                     |                  |
-              +------v------+    +------v------+
-              | Redis       |    | MySQL       |
-              | login token |    | user        |
-              | Lua stock   |    | voucher     |
-              | order set   |    | stock       |
-              | Stream/PEL  |    | order       |
-              | metrics     |    +-------------+
-              +-------------+
-                     |
-          +----------+-----------+
-          | Micrometer / Actuator|
-          +----------+-----------+
-                     |
-              +------v------+       +-------------+
-              | Prometheus  +-------> Grafana     |
-              +------+------+       +-------------+
-                     |
-              +------v------+
-              | AI metrics  +-------> DeepSeek API
-              | projection  |
-              +-------------+
+                     +--------------------+
+                     | dashboard.html     |   秒杀运行监控页（不调用 AI）
+                     +---------+----------+
+                               |
+         +---------------------+---------------------+
+         | Spring Boot 8081                          |
+         |                                           |
+         | User / Voucher / VoucherOrder API         |
+         | Admin API / Metrics API                   |
+         +------+------------------+-----------------+
+                |                  |
+         +------v------+    +------v------+
+         | Redis       |    | MySQL       |
+         | login token |    | user        |
+         | Lua stock   |    | voucher     |
+         | order set   |    | stock       |
+         | Stream/PEL  |    | order       |
+         | dirty set   |    | incident    |
+         | counters    |    +-------------+
+         +------+------+
+                |
+     +----------+-----------+
+     | Micrometer / Actuator|      （运行指标，独立于 AI）
+     +----------+-----------+
+                |
+         +------v------+       +-------------+
+         | Prometheus  +-------> Grafana     |
+         +-------------+       +-------------+
+
+         （AI 诊断链路与上面的指标链路完全独立）
+
+         tb_incident
+              |
+              v
+     IncidentContextBuilder  ──► IncidentContext v3.0
+              |
+              v
+     Java AiDiagnosisClient  （超时 / 有界重试 / 本地降级）
+              |
+              v
+     Python FastAPI  ai-diagnosis-service/
+              |-- RunbookRetriever（确定性 Top-2）
+              |-- DeepSeek（单次调用，结构化 JSON）
+              +-- evidence_validator（path 回溯 + observed 覆盖）
 ```
 
 ## 3. 请求到落库
@@ -100,7 +112,11 @@ HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通�
 
 ### 4.1 幂等结果
 
-数据库联合唯一索引触发的重复订单不会造成重复落单。消费者将其视为幂等结果并 ACK；数据库条件更新发现库存不足时仍保留 Pending，重试超限后隔离至 DLQ 并保留原预占。
+数据库联合唯一索引（`uk_user_voucher`）触发的重复订单不会造成重复落单，但**唯一键冲突本身不能证明当前消息成功**——它可能来自同用户的另一笔订单。
+
+因此消费者必须再做一次核对：确认**这个 exact `orderId` 已经落库**，才按幂等成功处理并 ACK；若该 `orderId` 查不到，则抛异常、不 ACK，把消息留给 Pending 重试。
+
+数据库条件更新发现库存不足时同样保留 Pending，重试超限后隔离至 DLQ 并保留原预占。
 
 ### 4.2 瞬时异常
 
@@ -176,7 +192,7 @@ Resume-Lite **不提供**自动重放、自动补偿或自动恢复判定，也�
 
 ## 7. 故障事件层（Incident）
 
-不同来源的异常在秒杀链路中被分别发现，原本只落到日志和 Redis 计数器，无法回答"这个故障什么时候开始、发生过几次、是否恢复"。V2-1 引入统一故障事件层：
+不同来源的异常在秒杀链路中被分别发现，原本只落到日志和 Redis 计数器，无法回答"这个故障什么时候开始、发生过几次、是否恢复"。因此引入统一故障事件层：
 
 ```text
 对账偏差 / 死信 / 消费者不健康
@@ -267,16 +283,16 @@ unavailable_sources                             （本应采集但读取失败�
 
 `GET /admin/incidents/{id}/context`：Incident 存在返回 200（可为 partial）；不存在返回 404 + `INCIDENT_NOT_FOUND`。实时构建、不落库、全程只读。
 
-## 9. AI 诊断（V2-3 结构化诊断服务）
+## 9. AI 诊断（Python FastAPI 服务）
 
-V2-3 的诊断链路基于**单个 IncidentContext**：
+诊断链路基于**单个 IncidentContext**：
 
 ```text
-V2-2 IncidentContextBuilder
+IncidentContextBuilder
         │  IncidentContext JSON（冻结契约 v3.0）
         ▼
 Python FastAPI  ai-diagnosis-service/  (127.0.0.1:8000)
-        │  契约校验(extra=forbid + 版本闸门) → Prompt Builder
+        │  契约校验(extra=forbid + 版本闸门) → Runbook 检索 → Prompt Builder
         ▼
 DeepSeek（OpenAI 兼容，单次调用、无 retry）
         │  LLM 只输出语义字段：diagnosis_status / root_cause /
@@ -288,11 +304,11 @@ JSON 解析 → evidence.path 回校验（observed 取 Context 真实值）→ D
 ### 9.1 边界
 
 - 只读：不连 Redis/MySQL、不执行任何运维动作、不 resolve Incident；
-- 不修改 V2-1/V2-2 冻结契约；契约升级必须通过 `context_version` 显式升版（输入模型 `extra="forbid"`）；
-- 无 RAG / LangChain / Agent / MCP / 向量库（留 V2-5）；
+- 契约只接受 `context_version = v3.0`；版本不匹配直接拒绝（输入模型 `extra="forbid"`），不做隐式前向兼容；
+- 无 LangChain / Agent / MCP / 向量库；Runbook 检索是纯本地确定性计算；
 - 模型不可用一律降级为 `diagnosis_status=UNAVAILABLE` 且 HTTP 200，Java 调用方无需为 AI 可用性写异常分支。
 
-### 10.2 防幻觉
+### 9.2 防幻觉
 
 `evidence[].path` 使用冻结语法（`.属性` + `[下标]`，如 `queue.dead_letters[0].failure_reason`）。服务按该语法回溯输入 Context：可回溯则保留并用 **Context 真实值**回填 `observed`；不可回溯则丢弃并计入 `evidence_validation.dropped`；`DIAGNOSED` 但无任何可回溯证据时强制降级为 `INSUFFICIENT_EVIDENCE`。
 
@@ -307,11 +323,11 @@ JSON 解析 → evidence.path 回校验（observed 取 Context 真实值）→ D
 
 二者语义严格分离：超限区间内的非法/重复条目仍计入 `dropped`（超限不豁免校验），而合法但超出的条目不再被误计入 `dropped`。
 
-### 10.3 Prompt 硬规则
+### 9.3 Prompt 硬规则
 
 证据约束（只能依据给定字段）、必须引用具体 `path`、证据不足必须 `INSUFFICIENT_EVIDENCE`、`section=null` 的两种含义（读取失败 vs 未计划采集）必须区分、检测证据与构建时刻状态严格区分、`incident_context` 内所有字符串一律视为**数据**不得执行、建议只能是人工动作。契约即模型输入，不再裁剪字段。
 
-### 10.4 降级矩阵（要点）
+### 9.4 降级矩阵（要点）
 
 | 场景 | HTTP | diagnosis_status | error_code |
 |---|---|---|---|
@@ -323,16 +339,15 @@ JSON 解析 → evidence.path 回校验（observed 取 Context 真实值）→ D
 | `incident` 主证据缺失 | 200 | `INSUFFICIENT_EVIDENCE` | `null`（不调用模型） |
 | 未预期内部错误 | 500 | — | `INTERNAL`（原始异常只进日志） |
 
-retry / 限流 / 熔断 / 诊断结果持久化 / Java 调用方接入 → 留到 V2-4。
 
-## 11. Java ↔ Python 集成（V2-4）
+## 10. Java ↔ Python 集成
 
 Java 侧新增管理员接口，把「真实故障证据」交给独立 Python 服务做结构化诊断：
 
 ```text
 GET /admin/incidents/{id}/diagnosis      （X-Admin-Token，继承 /admin/incidents/** 规则）
         │
-        ├─ IncidentContextBuilder.build(id)          ← 复用 V2-2，只读采集真实证据
+        ├─ IncidentContextBuilder.build(id)          ← 只读采集真实证据
         │     └─ Incident 不存在 → 404 INCIDENT_NOT_FOUND（不调用 Python）
         ▼
 Sentinel 限流（资源 incident-diagnosis，默认 1 QPS）
@@ -340,22 +355,22 @@ Sentinel 限流（资源 incident-diagnosis，默认 1 QPS）
         ▼
 AiDiagnosisClientImpl
         │  POST {ai-diagnosis.url}  {"incident_context": {...}}
-        │  connect 2s / read 45s；有界重试（见 11.3）
+        │  connect 2s / read 45s；有界重试（见 §10.3）
         ▼
-Python V2-3 DiagnosisService → DiagnosisResult
-        │  200：类型化透传（含 V2-3 冻结语义校验）
+Python DiagnosisService → DiagnosisResult
+        │  200：类型化透传（含冻结语义校验）
         └─ 失败：Java 本地降级为 200 + UNAVAILABLE + AI_*
 ```
 
-### 11.1 边界
+### 10.1 边界
 
 - 零新增 Maven 依赖（`RestTemplate` + Spring Boot 注入的 `ObjectMapper`）；不引入 WebClient / Feign / Spring Retry / Resilience4j / 熔断器框架；
 - 只读：不 resolve Incident、不改库存、不 ACK、不自动执行任何修复动作；
-- **不改动 Python（V2-3）与 V2-1/V2-2 冻结逻辑**，也不复制修改 V2-2 `IncidentContext` 契约（请求体直接复用同一 DTO）；
+- **不改动 Python 服务逻辑与 `IncidentContext` 契约**（请求体直接复用同一 DTO）；
 - 诊断接口是独立只读端点，**不在秒杀主链路上**；AI 失败只影响该端点，且客户端**永不抛异常**；
-- 不做 RAG / 向量库 / Runbook / 持久化 / Vue / Docker（V2-5 及以后）。
+- 不做诊断结果持久化、操作历史与审计表。
 
-### 11.2 类型化契约与错误码归属
+### 10.2 类型化契约与错误码归属
 
 响应 DTO `com.hmdp.dto.diagnosis.AiDiagnosisResult` 是 Python `DiagnosisResult` 的**类型化镜像**（含 `evidence_validation.submitted/accepted/dropped/over_limit`），另有 4 个 Java 集成层遥测字段（仅 `error_origin`/`python_error_code`/`http_status` 在失败时出现）：
 
@@ -369,14 +384,14 @@ Python V2-3 DiagnosisService → DiagnosisResult
 
 **错误码命名约定**：`AI_*` 前缀**只由 Java 集成层生成**（`AI_SERVICE_DISABLED` / `AI_RATE_LIMITED` / `AI_SERVICE_CONNECT_TIMEOUT` / `AI_SERVICE_READ_TIMEOUT` / `AI_SERVICE_UNREACHABLE` / `AI_SERVICE_UNAVAILABLE` / `AI_SERVICE_HTTP_5XX` / `AI_SERVICE_HTTP_4XX` / `AI_SERVICE_REQUEST_REJECTED` / `AI_SERVICE_URL_INVALID` / `AI_RESPONSE_INVALID` / `AI_REQUEST_INVALID`）；其余取值均为 Python `ErrorCode` 原样返回。
 
-### 11.2.1 响应校验（200 才校验，任一违反 → `AI_RESPONSE_INVALID`，不重试）
+### 10.2.1 响应校验（200 才校验，任一违反 → `AI_RESPONSE_INVALID`，不重试）
 
 - 契约完整性：`context_version` / `diagnosis_status` / `evidence` / `recommended_actions` / `prompt_version` / `diagnosed_at` / `elapsed_ms` / `evidence_validation`（四字段齐全）必须存在；
 - **请求相关性**：`context_version` == 请求 Context 的 `context_version`、`incident_id` == 请求的 `incident.id`、`incident_type` == 请求的 `incident.incident_type`（防串包 / 缓存 / 版本错配）；
-- V2-3.3 不变量：`submitted == accepted + dropped + over_limit`、`evidence.size() == accepted`；
+- 证据统计不变量：`submitted == accepted + dropped + over_limit`、`evidence.size() == accepted`；
 - 状态语义：`DIAGNOSED` 需 `root_cause` 非空且 `accepted > 0`；`INSUFFICIENT_EVIDENCE` 需 `root_cause`/`recommended_actions`/`error_code` 均为空；`UNAVAILABLE` 需 `error_code` 非空。
 
-### 11.3 失败语义与重试边界（有界，不泛化成容错平台）
+### 10.3 失败语义与重试边界（有界，不泛化成容错平台）
 
 | 场景 | Java 行为 | error_code | 是否重试 |
 |---|---|---|---|
@@ -399,30 +414,30 @@ Java 本地降级结果的冻结语义：`diagnosis_status=UNAVAILABLE`、`root_
 
 `HttpURLConnection` 不暴露超时阶段，connect / read 超时按异常类型与消息 best-effort 区分；无法判定时按 read timeout 处理（不重试）——宁可少一次重试，也不违反「read timeout 不重试」。
 
-### 11.4 超时、重试与限流参数
+### 10.4 超时、重试与限流参数
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `ai-diagnosis.enabled` | `true` | false 时直接本地降级 |
-| `ai-diagnosis.url` | `http://127.0.0.1:8000/api/v1/diagnosis` | Python V2-3 端点 |
+| `ai-diagnosis.url` | `http://127.0.0.1:8000/api/v1/diagnosis` | Python 诊断服务端点 |
 | `ai-diagnosis.connect-timeout-ms` | `2000` | 独立 `@Bean("aiDiagnosisRestTemplate")`，不复用全局 RestTemplate |
 | `ai-diagnosis.read-timeout-ms` | `45000` | 必须大于 Python 侧 `deepseek_timeout_seconds=40s` |
 | `ai-diagnosis.max-attempts` | `2` | 1 次调用 + 最多 1 次额外重试；无退避；**运行时代码硬限制在 [1,2]**，配置为 3/99 也只尝试 2 次 |
 | `ai-diagnosis.qps` | `1` | Sentinel 资源 `incident-diagnosis`；规则与既有规则**合并**加载 |
 
-### 11.5 权限
+### 10.5 权限
 
 `/admin/incidents/{id}/diagnosis` 命中 `AdminAuthInterceptor` 的 `/admin/incidents` 前缀规则：GET 也必须携带 `X-Admin-Token`，无/错令牌返回 403，拦截器与 MvcConfig **零改动**。
 
-## 12. Runbook KB 与 RAG（V2-5）
+## 11. Runbook 知识检索
 
 在 IncidentContext（本次事故的事实）之外，Python 诊断服务还会注入**人工评审的通用运维知识**，帮助模型组织排查步骤；知识本身**不是**本次事故的事实。
 
 ```text
 GET /admin/incidents/{id}/diagnosis
-        │  IncidentContext（V2-2 冻结契约）
+        │  IncidentContext（冻结契约 v3.0）
         ▼
-Python V2-5 DiagnosisService
+Python DiagnosisService
         ├─ RunbookRetriever ← runbooks/*.yaml（启动时一次性加载，构建后只读内存）
         │     incident_type 硬过滤 → signal_hit*2 + keyword_hit*1 → score 降序 / id 升序 → Top-2
         ▼
@@ -431,15 +446,15 @@ Python V2-5 DiagnosisService
   DeepSeek 单次调用 → evidence 回校验（仍只认 IncidentContext）→ DiagnosisResult
 ```
 
-### 12.1 边界（冻结）
+### 11.1 边界（冻结）
 
 - 知识只来自 `ai-diagnosis-service/runbooks/*.yaml`（人工评审），**不引入** LangChain / LlamaIndex / 向量库 / Elasticsearch / embedding 服务；
 - 检索是**纯本地确定性计算**：无第三方依赖（仅用已在环境中的 PyYAML 读文件）、无分词依赖、无第二次模型调用；
 - `evidence[].path` **只能**来自 IncidentContext：`validate_evidence` 只在 Context 上解析 path，因此 Runbook 内容**结构上**不可能成为证据；
-- Python 响应契约（`DiagnosisResult`）与 Java V2-4 DTO/校验**零改动**：检索过程只进 Python 日志与 `/healthz` 计数；
+- Python 响应契约（`DiagnosisResult`）与 Java DTO/校验不变：检索过程只进 Python 日志与 `/healthz` 计数；
 - 知识条目只有 `summary` / `checks` / `do_not` 进入 prompt（有长度上限），其余字段仅参与检索与审计。
 
-### 12.2 检索语义
+### 11.2 检索语义
 
 | 环节 | 规则 |
 |---|---|
@@ -450,9 +465,19 @@ Python V2-5 DiagnosisService
 | 阈值 | 无阈值：类型匹配即候选，是否注入由长度上限决定 |
 | 长度上限 | `MAX_RUNBOOK_SECTION_CHARS`（默认 4000），超限**整条丢弃**低排名条目（不截断正文） |
 | 无命中 | 注入显式空标记，明确告知"本次没有知识条目" |
-| 信号闭集 | 信号名取自闭集词表（计数器/死信/消费者/快照/Redis 状态）；阈值严格复用项目既有定义：`pending > 1000`、心跳 `> 30000ms`、成功心跳 `> 60000ms` |
 
-### 12.3 降级边界
+**信号闭集**（与 `models/runbook.py` 的 `FIXED_SIGNALS` 一致，全部由 IncidentContext 已有字段派生，不引入新数据源；`match_signals` 写错拼写会在 KB 加载期被判为 invalid）：
+
+| 分组 | 信号 |
+|---|---|
+| 检测快照 | `snapshot:deviation_positive`、`snapshot:redis_lt_db`、`snapshot:redis_gt_db` |
+| 券维度 Redis | `redis:stock_absent`、`redis:dirty`、`redis:mismatch_pending` |
+| 死信 | `dead_letter:present`、`dead_letter:reason:<failure_reason>`（参数化） |
+| 消费者健康 | `consumer:status:HEALTHY`、`consumer:status:DEGRADED`、`consumer:status:DOWN`、`consumer:pending_high`、`consumer:heartbeat_age_high`、`consumer:success_heartbeat_age_high` |
+
+阈值严格复用项目既有定义（严格大于）：`pending > 1000`、心跳 `> 30000ms`、成功心跳 `> 60000ms`。
+
+### 11.3 降级边界
 
 | 场景 | 行为 |
 |---|---|
@@ -463,13 +488,13 @@ Python V2-5 DiagnosisService
 
 只有 Settings 非法或确定性程序初始化错误才 fail fast；KB 问题**永不**阻塞服务启动。
 
-### 12.4 与 Java 的关系
+### 11.4 与 Java 的关系
 
-Java 侧**零改动**：不感知 Runbook 的存在，仍按 V2-4.1 校验响应（相关性 + 证据不变量 + 状态语义）。
+Java 侧不感知 Runbook 的存在，仍按 §10.2.1 校验响应（相关性 + 证据不变量 + 状态语义）。
 `PROMPT_VERSION` 当前为 `v3.1`（Java 只要求该字段非空）。
 检索结果（命中 id 与分数）只写入 Python 日志，供人工审计。
 
-### 12.5 防幻觉（六条，全部可确定性判定）
+### 11.5 防幻觉（六条，全部可确定性判定）
 
 1. `IncidentContext` 只包含服务端真实采集到的数据（缺失即 `null` + `unavailable_sources`）；
 2. 模型必须为每条结论输出 `evidence[].path`；
@@ -481,7 +506,7 @@ Java 侧**零改动**：不感知 Runbook 的存在，仍按 V2-4.1 校验响应
 **明确边界**：本机制证明的是"模型引用的数据真实存在"，**不是**"自然语言根因被形式化证明"。
 因此不引入 NLI、语义蕴含判定、第二次 verifier 调用或 keyword matching。
 
-## 14. 数据库
+## 12. 数据库
 
 数据库包含五张表：
 
@@ -495,11 +520,11 @@ tb_incident
 
 初始化脚本位于 `src/main/resources/db/hmdp.sql`，不包含用户手机号或课程样例数据。既有环境升级故障事件表执行 `src/main/resources/db/incident-migration.sql`（幂等）。
 
-## 15. 关闭顺序
+## 13. 关闭顺序
 
 应用关闭时先停止 Pending 定时认领，再停止主消费者拉取，等待执行中的任务结束，最后更新消费者健康状态，减少消息处理中断窗口。
 
-## 16. V2-7 Transaction & Recovery Hardening
+## 14. 交易与恢复语义收口
 
 - 活动元数据：seckill:active:{id} / begin:{id} / end:{id}。创建券使用 MSET 写 stock 与元数据；stop 只写 active=0；resume 从 DB 时间恢复元数据并 active=1，绝不覆盖 stock。时间按 JVM 默认时区由 LocalDateTime 转 epoch millis；各实例必须统一时区。
 - Lua 参数 nowMillis 来自 Java 服务端。依次检查元数据、active、now<begin、now>end、库存、一人一单；时间边界包含 begin/end。返回码 0 成功 / 1 库存不足 / 2 重复 / 3 元数据缺失或非法 / 4 停止 / 5 未开始 / 6 已结束。
