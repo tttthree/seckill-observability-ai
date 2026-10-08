@@ -53,7 +53,8 @@ class StockState(_StrictModel):
 
 class RedisEvidence(_StrictModel):
     stock: Optional[StockState]
-    ordered_user_count: Optional[int]
+    # Set 不存在时语义就是 0（正常空集合）；读取失败由 redis=null + unavailable_sources 表达
+    ordered_user_count: int
     dirty: Optional[bool]
     mismatch_pending: Optional[bool]
 
@@ -86,7 +87,8 @@ class DeadLetterEntry(_StrictModel):
 
 class QueueEvidence(_StrictModel):
     pending_count: Optional[int]
-    dead_letter_count: Optional[int]
+    # 刻意不含整个死信流的 XLEN：global 死信数 > 0 不代表当前券有死信（维度歧义）。
+    # 判断"该券是否仍有死信"只看 dead_letters 是否非空。
     dead_letters: Optional[List[DeadLetterEntry]]
 
 

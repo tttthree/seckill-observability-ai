@@ -228,10 +228,10 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
                 .setValue(stockRaw == null ? null : parseLongOrNull(stockRaw)));
 
         String orderKey = RedisConstants.SECKILL_ORDER_KEY + voucherId;
-        boolean orderPresent = Boolean.TRUE.equals(stringRedisTemplate.hasKey(orderKey));
-        evidence.setOrderedUserCount(orderPresent
-                ? stringRedisTemplate.opsForSet().size(orderKey)
-                : null);
+        // Set 不存在时 SCARD 语义就是 0（正常的空集合），不是"读取失败"；
+        // 真正读取失败会由外层 collect 把整个 redis 段置 null 并记入 unavailable_sources。
+        Long orderedUserCount = stringRedisTemplate.opsForSet().size(orderKey);
+        evidence.setOrderedUserCount(orderedUserCount == null ? 0L : orderedUserCount);
 
         evidence.setDirty(Boolean.TRUE.equals(stringRedisTemplate.opsForSet()
                 .isMember(RedisConstants.SECKILL_VOUCHER_DIRTY_KEY, String.valueOf(voucherId))));
@@ -290,11 +290,11 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
                 .pending(RedisConstants.STREAM_ORDERS_KEY, RedisConstants.STREAM_ORDERS_GROUP);
         evidence.setPendingCount(pending == null ? 0L : pending.getTotalPendingMessages());
 
-        Long deadCount = stringRedisTemplate.opsForStream()
+        // 整个死信流的 XLEN 只在内部用于"为空则跳过扫描"的有界读取优化，
+        // 不下发给 AI：global DLQ count > 0 不代表当前 voucher 有死信。
+        Long deadStreamLength = stringRedisTemplate.opsForStream()
                 .size(RedisConstants.STREAM_ORDERS_DEAD_KEY);
-        evidence.setDeadLetterCount(deadCount == null ? 0L : deadCount);
-
-        evidence.setDeadLetters(readDeadLetters(incident, evidence.getDeadLetterCount()));
+        evidence.setDeadLetters(readDeadLetters(incident, deadStreamLength));
         return evidence;
     }
 
@@ -306,9 +306,11 @@ public class IncidentContextBuilderImpl implements IncidentContextBuilder {
      * "最近一次检测证据"，只在 relatedVoucherId 缺失时作为 fallback 使用。
      * <p>
      * 达到扫描上限只写日志，不进入契约（不引入 truncation / scan_limit / notes）。
+     *
+     * @param deadStreamLength 整个死信流的 XLEN，仅用于"为空则跳过扫描"的内部优化，不下发
      */
-    private List<DeadLetterEntry> readDeadLetters(Incident incident, Long deadLetterCount) {
-        if (deadLetterCount == null || deadLetterCount == 0L) {
+    private List<DeadLetterEntry> readDeadLetters(Incident incident, Long deadStreamLength) {
+        if (deadStreamLength == null || deadStreamLength == 0L) {
             return Collections.emptyList();
         }
 

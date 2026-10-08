@@ -26,7 +26,7 @@
       "present": false,
       "value": null
     },
-    "ordered_user_count": null,
+    "ordered_user_count": 0,
     "dirty": true,
     "mismatch_pending": true
   },

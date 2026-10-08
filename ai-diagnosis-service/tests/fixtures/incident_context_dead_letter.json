@@ -48,7 +48,6 @@
   },
   "queue": {
     "pending_count": 1,
-    "dead_letter_count": 1,
     "dead_letters": [
       {
         "message_id": "1768465200000-0",

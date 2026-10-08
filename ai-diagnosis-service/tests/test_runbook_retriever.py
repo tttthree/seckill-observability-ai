@@ -206,19 +206,19 @@ def test_dead_letter_signals(dead_letter_payload):
     assert "dead_letter:reason:retry_exhausted" in signals
 
 
-def test_dead_letter_present_from_count_even_without_entries(context_payload):
-    """dead_letter_count > 0 但条目被券过滤掉时，仍应表达"死信流非空"。"""
+def test_no_dead_letter_signal_when_only_other_vouchers_have_dead_letters(context_payload):
+    """契约不含全局 XLEN：其它券有死信但当前券没有时，不得产生 dead_letter:present。"""
     data = clone(context_payload)
     data["incident"]["incident_type"] = "DEAD_LETTER"
     data["queue"] = {
         "pending_count": 0,
-        "dead_letter_count": 3,
         "dead_letters": [],
     }
 
     signals = derive_signals(IncidentContext.model_validate(data))
 
-    assert "dead_letter:present" in signals
+    assert "dead_letter:present" not in signals
+    assert not any(s.startswith("dead_letter:") for s in signals)
 
 
 def test_every_derived_signal_is_in_the_closed_vocabulary(

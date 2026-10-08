@@ -137,7 +137,6 @@ def test_datetime_semantics(context_payload):
 def test_dead_letter_fixture_maps_queue_evidence(dead_letter_payload):
     context = IncidentContext.model_validate(dead_letter_payload)
     assert context.incident.incident_type == "DEAD_LETTER"
-    assert context.queue.dead_letter_count == 1
     assert context.queue.dead_letters[0].failure_reason == "retry_exhausted"
     # message_id 语义统一为原主 Stream 消息 id
     assert context.queue.dead_letters[0].message_id == "1768465200000-0"

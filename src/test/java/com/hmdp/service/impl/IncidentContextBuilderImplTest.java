@@ -254,6 +254,36 @@ class IncidentContextBuilderImplTest {
         assertEquals(810000000000000009L, context.getQueue().getDeadLetters().get(0).getOrderId());
     }
 
+    @Test
+    void otherVouchersDeadLettersDoNotAppearForCurrentVoucher() {
+        // 整个死信流非空（其它券），但当前券没有匹配记录 → dead_letters 必须为空列表
+        stubIncident(IncidentType.DEAD_LETTER, null);
+        stubRedisHealthy();
+        stubDatabaseHealthy();
+        stubConsumerHealthy();
+
+        when(streamOperations.size("stream.orders.dead")).thenReturn(3L);
+        List<MapRecord<String, Object, Object>> others = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            Map<Object, Object> other = new LinkedHashMap<>();
+            other.put("voucherId", "999");
+            other.put("id", "81000000000000001" + i);
+            other.put("originalMessageId", "1768465200001-" + i);
+            other.put("failureReason", "retry_exhausted");
+            others.add(StreamRecords.<String, Object, Object>mapBacked(other)
+                    .withId(RecordId.of("1768465200001-" + i)));
+        }
+        when(streamOperations.reverseRange(anyString(), any(), any(Limit.class)))
+                .thenReturn((List) others);
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNotNull(context.getQueue());
+        assertNotNull(context.getQueue().getDeadLetters());
+        assertTrue(context.getQueue().getDeadLetters().isEmpty(),
+                "其它券的死信不得出现在当前券的证据里");
+    }
+
     // ==================== C. CONSUMER_UNHEALTHY ====================
 
     @Test
@@ -365,6 +395,37 @@ class IncidentContextBuilderImplTest {
 
         assertFalse(context.getRedis().getStock().getPresent());
         assertNull(context.getRedis().getStock().getValue());
+    }
+
+    @Test
+    void absentOrderSetYieldsZeroOrderedUsersNotNull() {
+        // 资格 Set 不存在时 SCARD 语义就是 0（正常空集合），不得用 null 表示；
+        // "Redis 读取失败"由 redis=null + unavailable_sources 表达，两者不可混用。
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubDatabaseHealthy();
+        stubRedisHealthy();
+        when(setOperations.size("seckill:order:" + VOUCHER_ID)).thenReturn(0L);
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNotNull(context.getRedis());
+        assertEquals(0L, context.getRedis().getOrderedUserCount());
+        assertTrue(context.getUnavailableSources().isEmpty());
+    }
+
+    @Test
+    void redisReadFailureStillNullsWholeSectionInsteadOfZero() {
+        // 读取本身抛异常 → 整个 redis 段为 null 并记入 unavailable_sources（与空集合区分）
+        stubIncident(IncidentType.INVENTORY_MISMATCH, null);
+        stubDatabaseHealthy();
+        stubRedisHealthy();
+        when(setOperations.size("seckill:order:" + VOUCHER_ID))
+                .thenThrow(new RuntimeException("redis connection refused"));
+
+        IncidentContext context = builder.build(INCIDENT_ID);
+
+        assertNull(context.getRedis());
+        assertEquals(List.of("redis"), context.getUnavailableSources());
     }
 
     @Test

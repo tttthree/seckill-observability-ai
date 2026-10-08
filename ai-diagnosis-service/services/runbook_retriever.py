@@ -72,8 +72,9 @@ def derive_signals(context: IncidentContext) -> frozenset:
 
     queue = context.queue
     if queue is not None:
+        # 只以"当前券相关死信条目"为准：整个死信流的全局计数不参与判定
         entries = queue.dead_letters or []
-        if entries or _positive_number(queue.dead_letter_count):
+        if entries:
             signals.add("dead_letter:present")
         for entry in entries:
             reason = (entry.failure_reason or "").strip()

@@ -99,7 +99,12 @@ public class IncidentContext {
         /** 库存 key 的真实读取结果：present=false 时 value 必须为 null，不得写成 0 */
         private StockState stock;
 
-        /** 当前券已获得下单资格的用户数（资格 Set 的基数） */
+        /**
+         * 当前券已获得下单资格的用户数（资格 Set 的基数）。
+         * <p>
+         * Set 不存在时语义就是 0（正常的空集合），因此该字段恒有值、不为 null；
+         * "Redis 读取失败"由 {@code redis=null} + {@code unavailable_sources=["redis"]} 表达。
+         */
         private Long orderedUserCount;
 
         /** 当前券是否在 dirty（待对账）集合中 */
@@ -161,10 +166,12 @@ public class IncidentContext {
         /** 消费者组 PEL 中尚未 ACK 的消息数（XPENDING） */
         private Long pendingCount;
 
-        /** 死信 Stream 当前总条数（XLEN） */
-        private Long deadLetterCount;
-
-        /** 与当前券相关的死信条目（从最新端有界扫描后过滤） */
+        /**
+         * 与当前券相关的死信条目（从最新端有界扫描后过滤）。
+         * <p>
+         * 刻意不提供整个死信流的 XLEN：global 死信数 &gt; 0 不代表当前券有死信，
+         * 下发会造成维度歧义。判断"该券是否仍有死信"只看本列表是否非空。
+         */
         private List<DeadLetterEntry> deadLetters;
     }
 

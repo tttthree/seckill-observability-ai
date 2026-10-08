@@ -221,7 +221,6 @@ def test_paths_resolve_on_real_fixture(context_payload):
 
 
 def test_dead_letter_fixture_paths_resolve(dead_letter_payload):
-    assert resolve_path(dead_letter_payload, "queue.dead_letter_count") == 1
     assert resolve_path(dead_letter_payload, "queue.dead_letters[0].message_id") == "1768465200000-0"
     assert resolve_path(dead_letter_payload, "consumer_health.status") == "HEALTHY"
 
