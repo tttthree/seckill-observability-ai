@@ -60,3 +60,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 pytest-cache-files-*/
+
+# Local diagnosis artifacts (not for commit)
+diagnosis.json
+v25-final.json
