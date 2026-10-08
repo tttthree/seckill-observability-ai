@@ -199,38 +199,6 @@ class VoucherOrderServiceImplReconcileTest {
         verify(setOperations, never()).remove(SECKILL_VOUCHER_DIRTY_KEY, VOUCHER_ID);
     }
 
-    @Test
-    void fallbackFindsVoucherOutsideDirtySetAndOnlyMarksDirty() {
-        when(seckillVoucherService.list(any(com.baomidou.mybatisplus.core.conditions.Wrapper.class)))
-                .thenReturn(java.util.List.of(new SeckillVoucher().setVoucherId(8L).setStock(0)));
-        service.fallbackReconcile();
-        verify(setOperations).add(SECKILL_VOUCHER_DIRTY_KEY, "8");
-        verify(valueOperations, never()).set(anyString(), anyString());
-        when(setOperations.members(SECKILL_VOUCHER_DIRTY_KEY)).thenReturn(Collections.singleton("8"));
-        when(seckillVoucherService.getById(8L)).thenReturn(new SeckillVoucher().setVoucherId(8L).setStock(0));
-        when(valueOperations.get(SECKILL_RECONCILE_MISMATCH_KEY + "8")).thenReturn("first");
-        service.reconcile();
-        verify(incidentService).report(any());
-    }
-
-    @Test
-    void fallbackIsBoundedAndMovesCursorAcrossPages() {
-        com.hmdp.config.SeckillProperties properties = new com.hmdp.config.SeckillProperties();
-        properties.getReconcile().setFallbackLimit(1);
-        ReflectionTestUtils.setField(service, "seckillProperties", properties);
-        when(seckillVoucherService.list(any(com.baomidou.mybatisplus.core.conditions.Wrapper.class)))
-                .thenReturn(java.util.List.of(new SeckillVoucher().setVoucherId(8L)), Collections.emptyList());
-        service.fallbackReconcile();
-        assertEquals(8L, ReflectionTestUtils.getField(service, "fallbackCursor"));
-        service.fallbackReconcile();
-        assertEquals(0L, ReflectionTestUtils.getField(service, "fallbackCursor"));
-        ArgumentCaptor<com.baomidou.mybatisplus.core.conditions.Wrapper> queries =
-                ArgumentCaptor.forClass(com.baomidou.mybatisplus.core.conditions.Wrapper.class);
-        verify(seckillVoucherService, times(2)).list(queries.capture());
-        org.junit.jupiter.api.Assertions.assertTrue(queries.getAllValues().get(0).getSqlSegment().contains("LIMIT 1"));
-        org.junit.jupiter.api.Assertions.assertTrue(queries.getAllValues().get(1).getSqlSegment().contains("voucher_id >"));
-    }
-
     private void stubStocks(String redisStock, int dbStock) {
         when(setOperations.members(SECKILL_VOUCHER_DIRTY_KEY))
                 .thenReturn(Collections.singleton(VOUCHER_ID));

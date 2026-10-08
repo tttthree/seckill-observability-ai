@@ -43,11 +43,10 @@ public class SeckillProperties {
         private int max = 3;
     }
 
+    /** 库存对账配置（dirty-set 驱动，只检查已标脏的券） */
     @Data
     public static class Reconcile {
         private long fixedDelayMs = 300000;
-        private long fallbackDelayMs = 1800000;
-        private int fallbackLimit = 100;
     }
 
     @Data

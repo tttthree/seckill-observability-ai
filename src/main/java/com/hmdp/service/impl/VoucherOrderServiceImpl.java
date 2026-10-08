@@ -634,30 +634,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     /**
-     * 库存对账：对比 Redis 库存 vs DB 库存（脏券驱动，两阶段告警）
+     * 库存对账：对比 Redis 库存 vs DB 库存（脏券驱动，两阶段告警）。
+     * <p>
+     * 只检查本应用业务链路已标记为 dirty 的券，不做周期性整表扫描；
+     * 绕过应用直接改库造成的漂移不在当前原型的一致性检测范围内。
      */
-    private long fallbackCursor = 0;
-
-    /** 低频有界分页兜底；每轮只发现并标脏，绝不写库存。 */
-    @Scheduled(fixedDelayString = "#{@seckillProperties.reconcile.fallbackDelayMs}",
-            initialDelayString = "#{@seckillProperties.reconcile.fallbackDelayMs}")
-    public synchronized void fallbackReconcile() {
-        try {
-            int limit = Math.max(1, Math.min(1000, seckillProperties.getReconcile().getFallbackLimit()));
-            List<SeckillVoucher> vouchers = seckillVoucherService.list(
-                    com.baomidou.mybatisplus.core.toolkit.Wrappers.<SeckillVoucher>lambdaQuery()
-                            .gt(SeckillVoucher::getVoucherId, fallbackCursor)
-                            .orderByAsc(SeckillVoucher::getVoucherId).last("LIMIT " + limit));
-            for (SeckillVoucher voucher : vouchers) {
-                stringRedisTemplate.opsForSet().add(RECONCILE_KEY, String.valueOf(voucher.getVoucherId()));
-            }
-            // 只有完整标脏成功后才推进游标；失败下一轮重扫同一页。
-            fallbackCursor = vouchers.size() < limit ? 0 : vouchers.get(vouchers.size() - 1).getVoucherId();
-        } catch (Exception e) {
-            log.warn("兜底对账扫描失败，保留游标等待下轮", e);
-        }
-    }
-
     @Scheduled(fixedDelayString = "#{@seckillProperties.reconcile.fixedDelayMs}")
     public void reconcile() {
         try {
