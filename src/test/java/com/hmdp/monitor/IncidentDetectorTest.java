@@ -3,10 +3,8 @@ package com.hmdp.monitor;
 import com.hmdp.config.SeckillProperties;
 import com.hmdp.constant.IncidentConstants;
 import com.hmdp.dto.IncidentReport;
-import com.hmdp.entity.Incident;
 import com.hmdp.enums.IncidentSeverity;
 import com.hmdp.enums.IncidentSource;
-import com.hmdp.enums.IncidentStatus;
 import com.hmdp.enums.IncidentType;
 import com.hmdp.service.IncidentService;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,19 +16,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.boot.actuate.health.Health;
-import org.springframework.data.redis.connection.RedisZSetCommands.Limit;
-import org.springframework.data.redis.connection.stream.MapRecord;
-import org.springframework.data.redis.connection.stream.StreamRecords;
-import org.springframework.data.redis.core.StreamOperations;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
@@ -39,6 +28,11 @@ import static org.mockito.Mockito.when;
 
 /**
  * 故障状态检测器测试：只读取 ConsumerHealthIndicator 的既有判定结果，不复制阈值逻辑。
+ *
+ * <p>
+ * Resume-Lite 不再实现 DEAD_LETTER 的自动重放 / 补偿 / 恢复闭环，因此本测试只覆盖
+ * CONSUMER_UNHEALTHY 的 OPEN / RESOLVE 映射；死信事件保持 OPEN 属明确边界。
+ * </p>
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -48,16 +42,6 @@ class IncidentDetectorTest {
     private IncidentService incidentService;
     @Mock
     private ConsumerHealthIndicator consumerHealthIndicator;
-    @Mock
-    private StringRedisTemplate stringRedisTemplate;
-    @Mock
-    private StreamOperations<String, Object, Object> streamOperations;
-    @Mock
-    private org.springframework.data.redis.core.ValueOperations<String, String> values;
-    @Mock
-    private com.hmdp.service.ISeckillVoucherService vouchers;
-    @Mock
-    private org.springframework.data.redis.core.SetOperations<String, String> recovery;
 
     private IncidentDetector detector;
 
@@ -66,15 +50,7 @@ class IncidentDetectorTest {
         detector = new IncidentDetector();
         ReflectionTestUtils.setField(detector, "incidentService", incidentService);
         ReflectionTestUtils.setField(detector, "consumerHealthIndicator", consumerHealthIndicator);
-        ReflectionTestUtils.setField(detector, "stringRedisTemplate", stringRedisTemplate);
         ReflectionTestUtils.setField(detector, "seckillProperties", new SeckillProperties());
-        ReflectionTestUtils.setField(detector, "seckillVoucherService", vouchers);
-        when(stringRedisTemplate.opsForValue()).thenReturn(values);
-        when(stringRedisTemplate.opsForSet()).thenReturn(recovery);
-        when(recovery.size(anyString())).thenReturn(0L);
-        when(stringRedisTemplate.opsForStream()).thenReturn(streamOperations);
-        when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
-                .thenReturn(Collections.emptyList());
     }
 
     /** 健康检查 DOWN（心跳超时/Pending 堆积/线程未启动）→ CRITICAL 故障事件 */
@@ -131,63 +107,34 @@ class IncidentDetectorTest {
         verify(incidentService, never()).report(any());
     }
 
-    /** 死信流中已无该券记录 → 关闭对应故障事件（重放成功后的真实恢复信号） */
+    /** HEALTHY 判定完全来自 HealthIndicator 的 consumer_status，检测器不复制阈值 */
     @Test
-    void shouldResolveDeadLetterIncidentWhenNoDeadLetterRemains() {
-        when(values.get("seckill:stock:9")).thenReturn("1");
-        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(1));
-        stubHealthyConsumer();
-        when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
-                .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
-        when(streamOperations.range(anyString(), any(), any()))
-                .thenReturn(List.of(record("8")));
+    void shouldTrustConsumerStatusFromHealthIndicator() {
+        // pending 很高但 HealthIndicator 仍报 HEALTHY：检测器必须照它的判定走，不自行改判
+        when(consumerHealthIndicator.health()).thenReturn(Health.up()
+                .withDetail("consumer_status", "HEALTHY")
+                .withDetail("pending_count", 9999L)
+                .build());
 
         detector.detect();
 
-        verify(incidentService).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+        verify(incidentService).resolve(IncidentType.CONSUMER_UNHEALTHY,
+                IncidentConstants.BUSINESS_KEY_CONSUMER_GROUP);
+        verify(incidentService, never()).report(any());
     }
 
-    /** 死信流中仍有该券记录 → 维持 OPEN，不伪造恢复 */
+    /** Health UP 但缺少 consumer_status → 视为 UNKNOWN，按不健康上报 MEDIUM */
     @Test
-    void shouldKeepDeadLetterIncidentOpenWhileDeadLetterRemains() {
-        stubHealthyConsumer();
-        when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
-                .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
-        when(streamOperations.range(anyString(), any(), any()))
-                .thenReturn(List.of(record("9")));
+    void shouldTreatMissingConsumerStatusAsUnhealthy() {
+        when(consumerHealthIndicator.health()).thenReturn(Health.up()
+                .withDetail("reason", "未提供原因")
+                .build());
 
         detector.detect();
 
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    /** 死信记录数达到扫描上限 → 无法确认"已无死信"，不做恢复判定 */
-    @Test
-    void shouldNotResolveWhenDeadLetterScanReachesLimit() {
-        stubHealthyConsumer();
-        when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
-                .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
-        MapRecord<String, Object, Object> single = record("9");
-        when(streamOperations.range(anyString(), any(), any()))
-                .thenReturn(Collections.nCopies(IncidentConstants.DEAD_LETTER_SCAN_LIMIT, single));
-
-        detector.detect();
-
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    /** 死信流不可读 → 保持现状，不误判恢复 */
-    @Test
-    void shouldNotResolveWhenDeadLetterStreamIsUnreadable() {
-        stubHealthyConsumer();
-        when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
-                .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
-        when(streamOperations.range(anyString(), any(), any()))
-                .thenThrow(new RuntimeException("redis down"));
-
-        detector.detect();
-
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+        IncidentReport report = captureSingleReport();
+        assertEquals(IncidentSeverity.MEDIUM, report.getSeverity());
+        assertEquals("UNKNOWN", report.getEvidence().get("consumer_status"));
     }
 
     /** 未启用时不做任何状态同步 */
@@ -204,120 +151,28 @@ class IncidentDetectorTest {
         verify(consumerHealthIndicator, never()).health();
     }
 
+    /** 检测器不再持有任何 Redis / 券服务依赖（死信自动恢复已随 Resume-Lite 移除） */
     @Test
-    void dlqGoneDoesNotResolveUntilStocksMatch() {
-        stubRecovery();
-        when(values.get("seckill:stock:9")).thenReturn("0");
-        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(1));
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
+    void shouldNotRequireRedisOrVoucherDependencies() throws Exception {
+        for (String field : new String[]{"stringRedisTemplate", "seckillVoucherService"}) {
+            assertNull(findField(field), "IncidentDetector 不应再持有依赖: " + field);
+        }
     }
 
-    @Test
-    void missingRedisStockEvenWithZeroDbDoesNotResolve() {
-        stubRecovery();
-        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(0));
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    @Test
-    void missingDbDoesNotResolve() {
-        stubRecovery();
-        when(values.get("seckill:stock:9")).thenReturn("0");
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    @Test
-    void redisQueryFailureDoesNotResolve() {
-        stubRecovery();
-        when(values.get(anyString())).thenThrow(new RuntimeException("redis unavailable"));
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    @Test
-    void dbQueryFailureDoesNotResolve() {
-        stubRecovery();
-        when(values.get("seckill:stock:9")).thenReturn("0");
-        when(vouchers.getById(9L)).thenThrow(new RuntimeException("db unavailable"));
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    private void stubRecovery() {
-        stubHealthyConsumer();
-        when(incidentService.listOpenIncidents(IncidentType.DEAD_LETTER))
-                .thenReturn(List.of(openDeadLetterIncident(9L, "voucher:9")));
-        when(streamOperations.range(anyString(), any(), any())).thenReturn(Collections.emptyList());
-    }
-
-    @Test
-    void equalZeroStocksCannotResolveWhileReplayOrderIsPending() {
-        stubRecovery();
-        when(values.get("seckill:stock:9")).thenReturn("0");
-        when(vouchers.getById(9L)).thenReturn(new com.hmdp.entity.SeckillVoucher().setStock(0));
-        when(recovery.size("seckill:dead:recovery:9")).thenReturn(1L);
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-        when(recovery.size("seckill:dead:recovery:9")).thenReturn(0L);
-        detector.detect();
-        verify(incidentService).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    @Test
-    void oneRemainingOrderKeepsIncidentOpen() {
-        stubRecovery();
-        when(recovery.size("seckill:dead:recovery:9")).thenReturn(2L, 1L);
-        detector.detect();
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    @Test
-    void recoveryLookupFailureOrUnknownResultKeepsIncidentOpen() {
-        stubRecovery();
-        when(recovery.size(anyString())).thenReturn(null);
-        detector.detect();
-        when(recovery.size(anyString())).thenThrow(new RuntimeException("redis unavailable"));
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    @Test
-    void nullOrMalformedDlqCannotProveRecovery() {
-        stubRecovery();
-        when(streamOperations.range(anyString(), any(), any())).thenReturn(null);
-        detector.detect();
-        when(streamOperations.range(anyString(), any(), any())).thenReturn(List.of(record("not-a-voucher")));
-        detector.detect();
-        verify(incidentService, never()).resolve(IncidentType.DEAD_LETTER, "voucher:9");
-    }
-
-    private void stubHealthyConsumer() {
-        when(consumerHealthIndicator.health()).thenReturn(Health.up()
-                .withDetail("consumer_status", "HEALTHY")
-                .build());
+    private static java.lang.reflect.Field findField(String name) {
+        for (Class<?> type = IncidentDetector.class; type != null; type = type.getSuperclass()) {
+            try {
+                return type.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+                // 继续向上查找
+            }
+        }
+        return null;
     }
 
     private IncidentReport captureSingleReport() {
         ArgumentCaptor<IncidentReport> captor = ArgumentCaptor.forClass(IncidentReport.class);
         verify(incidentService).report(captor.capture());
         return captor.getValue();
-    }
-
-    private static Incident openDeadLetterIncident(Long voucherId, String businessKey) {
-        return new Incident()
-                .setIncidentType(IncidentType.DEAD_LETTER)
-                .setStatus(IncidentStatus.OPEN)
-                .setBusinessKey(businessKey)
-                .setRelatedVoucherId(voucherId);
-    }
-
-    private static MapRecord<String, Object, Object> record(String voucherId) {
-        Map<Object, Object> values = new HashMap<>();
-        values.put("voucherId", voucherId);
-        return StreamRecords.mapBacked(values).<String>withStreamKey("stream.orders.dead");
     }
 }

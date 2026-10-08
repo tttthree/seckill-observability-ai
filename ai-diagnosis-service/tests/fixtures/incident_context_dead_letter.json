@@ -12,7 +12,7 @@
     "last_detected_at": "2026-01-15T16:20:00",
     "resolved_at": null,
     "title": "订单消息重试超限进入死信队列（voucherId=7001）",
-    "description": "消息 1768465200000-0 超过最大重试次数 3，已隔离至死信队列，Redis 预占和下单资格仍保留（HELD），等待人工重放",
+    "description": "消息 1768465200000-0 超过最大重试次数 3，已隔离至死信队列，Redis 预占和下单资格仍保留，等待人工核查",
     "detected_snapshot": {
       "message_id": "1768465200000-0",
       "voucher_id": 7001,

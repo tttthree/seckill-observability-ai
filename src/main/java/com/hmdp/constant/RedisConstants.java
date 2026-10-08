@@ -21,6 +21,4 @@ public class RedisConstants {
     /** 两阶段对账：某张券"首次发现不一致"的标记 key 前缀，值为发现时间戳 */
     public static final String SECKILL_RECONCILE_MISMATCH_KEY = "seckill:reconcile:mismatch:";
     public static final String STREAM_RETRY_KEY = "stream:retry:";
-    /** 重放订单尚未确认落库；无 TTL，只有提交/同 orderId 幂等确认才能清除。 */
-    public static final String DEAD_RECOVERY_KEY = "seckill:dead:recovery:";
 }

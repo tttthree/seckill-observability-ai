@@ -23,10 +23,4 @@ public class IncidentConstants {
 
     /** description 列长度上限 */
     public static final int DESCRIPTION_MAX_LENGTH = 1000;
-
-    /**
-     * 死信恢复判定单次扫描条数上限（扫描安全边界，不是故障判定阈值）。
-     * 达到上限时不判定"已无死信"，避免误报恢复。
-     */
-    public static final int DEAD_LETTER_SCAN_LIMIT = 2000;
 }

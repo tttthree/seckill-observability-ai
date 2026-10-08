@@ -7,8 +7,6 @@ import com.hmdp.utils.SeckillActivity;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
@@ -18,7 +16,7 @@ import static com.hmdp.constant.MetricsConstants.*;
 import static com.hmdp.constant.RedisConstants.*;
 
 /**
- * 运维管理接口（秒杀控制、死信重放、手动对账、实时统计）
+ * 运维管理接口（秒杀控制、手动对账、实时统计）
  *
  */
 @Slf4j
@@ -38,13 +36,6 @@ public class AdminController {
     private static final String QUEUE_NAME = STREAM_ORDERS_KEY;
     private static final String DEAD_LETTER_QUEUE = STREAM_ORDERS_DEAD_KEY;
     private static final String RECONCILE_KEY = SECKILL_VOUCHER_DIRTY_KEY;
-    private static final DefaultRedisScript<Long> REPLAY_DEAD_LETTER_SCRIPT;
-
-    static {
-        REPLAY_DEAD_LETTER_SCRIPT = new DefaultRedisScript<>();
-        REPLAY_DEAD_LETTER_SCRIPT.setLocation(new ClassPathResource("replay-dead-letter.lua"));
-        REPLAY_DEAD_LETTER_SCRIPT.setResultType(Long.class);
-    }
 
     // ==================== 实时统计 ====================
 
@@ -153,62 +144,6 @@ public class AdminController {
                 "voucher_id", voucherId,
                 "activity", SeckillActivity.status("1", metadata.get(SECKILL_BEGIN_KEY + voucherId),
                         metadata.get(SECKILL_END_KEY + voucherId), System.currentTimeMillis())
-        );
-    }
-
-    // ==================== 死信队列管理 ====================
-
-    /**
-     * 重放死信队列中的消息到主 Stream
-     * POST /admin/dead-letter/replay
-     */
-    @PostMapping("/dead-letter/replay")
-    public Map<String, Object> replayDeadLetters() {
-        int count = 0;
-
-        try {
-            // XRANGE 直接读，不需要消费者组，不挂 PEL
-            var records = stringRedisTemplate.opsForStream()
-                    .range(DEAD_LETTER_QUEUE, Range.unbounded());
-
-            if (records != null) {
-                for (var record : records) {
-                    Map<Object, Object> value = record.getValue();
-                    Object userId = value.get("userId");
-                    Object voucherId = value.get("voucherId");
-                    Object orderId = value.get("id");
-                    if (userId == null || voucherId == null || orderId == null) {
-                        log.error("跳过字段不完整的死信 messageId={}", record.getId());
-                        continue;
-                    }
-                    Long replayed = stringRedisTemplate.execute(
-                            REPLAY_DEAD_LETTER_SCRIPT,
-                            List.of(
-                                    DEAD_LETTER_QUEUE,
-                                    QUEUE_NAME,
-                                    SECKILL_STOCK_KEY + voucherId,
-                                    SECKILL_ORDER_KEY + voucherId,
-                                    DEAD_RECOVERY_KEY + voucherId),
-                            record.getId().getValue(),
-                            String.valueOf(userId),
-                            String.valueOf(voucherId),
-                            String.valueOf(orderId),
-                            String.valueOf(value.getOrDefault("reservationState", "LEGACY")));
-                    if (Long.valueOf(1L).equals(replayed)) {
-                        count++;
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.error("死信重放失败", e);
-            return Map.of("success", false, "message", "死信重放失败，请查看服务日志");
-        }
-
-        log.info("死信重放完成: {} 条消息已重新投递到 {}", count, QUEUE_NAME);
-        return Map.of(
-                "success", true,
-                "replayed_count", count,
-                "target_queue", QUEUE_NAME
         );
     }
 

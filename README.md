@@ -40,7 +40,7 @@ Redis Stream 消费者组
 |---|---|
 | 原子资格预占 | Lua 将库存检查、一人一单、扣库存、资格记录和 Stream 投递合并为一次 Redis 原子操作 |
 | 可靠异步落库 | Redis Stream 消费者组批量拉取；Pending 处理器通过 `XCLAIM` 认领超时消息并限次重试 |
-| 原子死信隔离与重放 | 新死信保留库存/资格预占（HELD）；重放只重投主流，历史无标记死信仍重新预占 |
+| 原子死信隔离 | 重试超限后 XACK 原消息并写入死信队列，**不自动回补 Redis 库存/资格**，避免 DB 晚提交导致重复释放 |
 | 数据库一致性兜底 | `UPDATE ... WHERE stock > 0` 防超卖，用户与优惠券联合唯一索引防重复订单 |
 | 两阶段库存对账 | 脏券驱动，连续两次确认偏差后告警，降低异步落库窗口造成的瞬时误报 |
 | 统一故障事件 | 对账偏差、死信、消费者不健康统一抽象为 Incident，按 `incidentType + businessKey` 聚合与恢复，为后续 AI 诊断提供可追溯上下文 |
@@ -117,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File scripts/regression.ps1 `
   -AdminToken $env:ADMIN_TOKEN
 ```
 
-脚本验证验证码登录、秒杀券创建、Lua 预占、重复请求拦截、Stream 异步落库、死信隔离与重放、库存对账和运行指标采集。脚本不调用外部 AI 服务。
+脚本验证验证码登录、秒杀券创建、Lua 预占、重复请求拦截、Stream 异步落库、死信隔离、库存对账和运行指标采集。脚本不调用外部 AI 服务。
 
 JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存，线程在 10 秒 Ramp-up 内逐步启动。完整准备、执行命令与参数见 [benchmark/README.md](benchmark/README.md)。
 
@@ -133,7 +133,6 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 | GET | `/admin/incidents/{incidentId}/context` | 实时构建该故障的 IncidentContext（V2-2） |
 | GET | `/admin/incidents/{incidentId}/diagnosis` | 单事件 AI 诊断（V2-4：调用独立 Python 服务，失败降级为 UNAVAILABLE） |
 | GET | `/admin/seckill/{id}/stats` | 查看库存与队列状态 |
-| POST | `/admin/dead-letter/replay` | 原子重放死信 |
 | POST | `/admin/reconcile/trigger` | 手动触发库存对账 |
 
 故障事件只由系统内部检测逻辑产生，不提供创建接口。`/admin/incidents/**` 的只读查询同样要求 `X-Admin-Token`——故障事件包含业务键、关联券 id 与库存快照，属于敏感运维数据；其余 `/admin/**` 只读接口保持原有约定（GET 免令牌）。

@@ -47,7 +47,6 @@ import com.hmdp.exception.SeckillExceptions.*;
 
 import static com.hmdp.constant.MetricsConstants.*;
 import static com.hmdp.constant.RedisConstants.SECKILL_STOCK_KEY;
-import static com.hmdp.constant.RedisConstants.SECKILL_ORDER_KEY;
 import static com.hmdp.constant.RedisConstants.STREAM_RETRY_KEY;
 
 /**
@@ -377,7 +376,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
                     VoucherOrder voucherOrder = BeanUtil.fillBeanWithMap(values, new VoucherOrder(), true);
                     if (orderExistsInDB(voucherOrder.getId())) {
-                        clearRecoveryPending(voucherOrder);
                         stringRedisTemplate.opsForStream()
                                 .acknowledge(QUEUE_NAME, CONSUMER_GROUP, record.getId());
                         continue;
@@ -448,32 +446,23 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         return getById(orderId) != null;
     }
 
-    /** 必须在事务代理返回（已提交）或同 orderId 已存在的确认之后调用。 */
-    private void clearRecoveryPending(VoucherOrder order) {
-        Long removed = stringRedisTemplate.opsForSet().remove(
-                RedisConstants.DEAD_RECOVERY_KEY + order.getVoucherId(), String.valueOf(order.getId()));
-        if (removed == null) throw new IllegalStateException("recovery marker 清理结果不可确认");
-    }
-
     /**
      * 处理订单，事务成功后记录 M_COMMIT_SUCCESS 指标
      */
     public void handleVoucherOrder(VoucherOrder voucherOrder) {
         try {
             if (orderExistsInDB(voucherOrder.getId())) {
-                clearRecoveryPending(voucherOrder);
                 return;
             }
             voucherOrderService.createVoucherOrder(voucherOrder);
-            clearRecoveryPending(voucherOrder);
             // 事务提交成功后埋点（Redis 原子计数器，Prometheus 通过 Gauge 采集）
             incrMetric(M_COMMIT_SUCCESS);
         }  catch (DuplicateKeyException e) {
-            // 唯一键冲突本身不能证明该 orderId 成功（可能是同用户另一订单）。
+            // 唯一键冲突本身不能证明该 orderId 成功（可能是同用户另一订单）：
+            // 必须确认"这个 exact orderId 已落库"才能按幂等成功处理，否则保留消息等待重试。
             if (!orderExistsInDB(voucherOrder.getId())) {
-                throw new OrderCreateFailedException("重复键但当前 orderId 未确认落库，保留恢复标记", e);
+                throw new OrderCreateFailedException("重复键但当前 orderId 未确认落库，保留消息等待重试", e);
             }
-            clearRecoveryPending(voucherOrder);
             // 主键冲突（orderId 重复），极端并发下的防御性兜底；真正的"一人一单"由 Lua SISMEMBER 保证
             incrMetric(M_DUPLICATE_REQUEST);
             log.warn("主键冲突 orderId={}, userId={}, voucherId={}",
@@ -518,7 +507,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     /**
-     * 死信隔离：保留 reservation + 移入死信队列 + ACK 原消息
+     * 死信隔离：XACK 原消息 + 移入死信队列 + 删除重试计数。
+     * <p>
+     * 刻意不触碰 Redis 库存与一人一单资格：进入 DLQ 时无法证明此前的事务不会晚提交，
+     * 自动回补会造成重复释放。保留的预占交由人工核查处理。
      * <p>
      * 由 PendingHandlerTask 调用，保证死信处理逻辑一致
      */
@@ -538,8 +530,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 DEAD_LETTER_SCRIPT,
                 List.of(
                         QUEUE_NAME,
-                        SECKILL_STOCK_KEY + vid,
-                        SECKILL_ORDER_KEY + vid,
                         DEAD_LETTER_QUEUE,
                         STREAM_RETRY_KEY + messageId),
                 CONSUMER_GROUP,
@@ -549,7 +539,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 String.valueOf(orderId),
                 "retry_exhausted");
         if (Long.valueOf(1L).equals(routed)) {
-            log.info("死信隔离完成，保留 Redis 预占 voucherId={}, orderId={}", vid, orderId);
+            log.info("死信隔离完成，Redis 预占与下单资格保持不变，等待人工核查 voucherId={}, orderId={}", vid, orderId);
             // 重试超限是真实故障：上报为统一故障事件（按 voucherId 聚合）
             reportDeadLetter(vid, userId, orderId, messageId);
         } else {
@@ -624,7 +614,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .setRelatedVoucherId(relatedVoucherId)
                 .setTitle("订单消息重试超限进入死信队列（voucherId=" + voucherId + "）")
                 .setDescription(String.format(
-                        "消息 %s 超过最大重试次数 %d，已隔离至死信队列，Redis 预占和下单资格仍保留（HELD），等待人工重放",
+                        "消息 %s 超过最大重试次数 %d，已隔离至死信队列，Redis 预占和下单资格仍保留，等待人工核查",
                         messageId, maxRetry))
                 .setEvidence(evidence));
     }

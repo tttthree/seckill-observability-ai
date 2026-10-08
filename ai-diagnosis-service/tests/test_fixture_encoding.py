@@ -72,7 +72,7 @@ def test_dead_letter_fixture_chinese_is_intact():
     incident = payload["incident"]
     assert incident["title"] == "订单消息重试超限进入死信队列（voucherId=7001）"
     assert "已隔离至死信队列" in incident["description"]
-    assert "等待人工重放" in incident["description"]
+    assert "等待人工核查" in incident["description"]
 
 
 def test_consumer_unhealthy_fixture_chinese_is_intact():

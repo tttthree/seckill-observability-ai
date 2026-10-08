@@ -60,12 +60,8 @@ function activity()
 end
 function reservation()
     values.stock='0'; sets.users={user=true}; values.retry='4'; pending.message=true
-    KEYS={'source','stock','users','dead','retry'}
+    KEYS={'source','dead','retry'}
     ARGV={'group','message','user','1','order','retry_exhausted'}
-end
-function replay(state)
-    streams.dead={message={reservationState=state}}; KEYS={'dead','target','stock','users','recovery'}
-    ARGV={'message','user','1','order',state}
 end
 """
 
@@ -126,66 +122,28 @@ class LuaContracts(unittest.TestCase):
         execute("dead-letter.lua", "reservation(); dbStock=1", """
             assert(result==1); assert(values.stock=='0'); assert(sets.users.user)
             assert(not calls.incrby and not calls.srem); assert(not pending.message)
-            assert(values.retry==nil); assert(streams.dead['1'].reservationState=='HELD')
+            assert(values.retry==nil)
+            assert(streams.dead['1'].failureReason=='retry_exhausted')
+            assert(streams.dead['1'].originalMessageId=='message')
+            assert(streams.dead['1'].reservationState==nil)
             -- Original DB transaction completes after quarantine: reservation already matches it.
             dbStock=dbStock-1; dbOrder=true
             assert(dbOrder and tonumber(values.stock)==dbStock and sets.users.user)
+        """)
+
+    def test_dead_letter_never_touches_stock_or_ordered_users_keys(self):
+        execute("dead-letter.lua", "reservation()", """
+            assert(result==1)
+            -- 脚本必须完全不访问库存 / 一人一单 key
+            assert(not keyCalls['get:stock'] and not keyCalls['set:stock'])
+            assert(not keyCalls['sismember:users'] and not keyCalls['sadd:users'] and not keyCalls['srem:users'])
+            assert(values.stock=='0' and sets.users.user)
         """)
 
     def test_duplicate_dead_letter_is_noop(self):
         execute("dead-letter.lua", "reservation(); pending.message=nil", """
             assert(result==0); assert(values.stock=='0'); assert(sets.users.user)
             assert(not calls.xadd and not calls.incrby and not calls.srem)
-        """)
-
-    def test_held_replay_never_double_reserves(self):
-        execute("replay-dead-letter.lua", "values.stock='0'; sets.users={user=true}; replay('HELD')", """
-            assert(result==1); assert(values.stock=='0'); assert(sets.users.user)
-            assert(not calls.incrby and not keyCalls['sadd:users'])
-            assert(sets.recovery.order)
-            assert(count(streams.dead)==0 and count(streams.target)==1)
-        """)
-
-    def test_legacy_replay_reserves(self):
-        execute("replay-dead-letter.lua", "values.stock='1'; replay(nil)", """
-            assert(result==1); assert(values.stock=='0'); assert(sets.users.user)
-            assert(sets.recovery.order)
-            assert(count(streams.dead)==0 and count(streams.target)==1)
-        """)
-
-    def test_legacy_rejection_preserves_dead_letter(self):
-        for change, expected in [("values.stock='0'", -1), ("values.stock='1'; sets.users={user=true}", -2)]:
-            with self.subTest(expected=expected):
-                execute("replay-dead-letter.lua", "replay('LEGACY'); " + change, f"""
-                    assert(result=={expected}); assert(count(streams.dead)==1)
-                    assert(not calls.xdel and not calls.incrby and not calls.sadd and not calls.xadd)
-                """)
-
-    def test_deleted_held_entry_cannot_be_replayed_twice(self):
-        execute("replay-dead-letter.lua", "values.stock='0'; sets.users={user=true}; replay('HELD'); streams.dead={}", """
-            assert(result==0); assert(not calls.xadd and not calls.incrby and not calls.sadd)
-        """)
-
-    def test_failed_replay_quarantine_retains_recovery_marker(self):
-        quarantine = (ROOT / "src/main/resources/dead-letter.lua").read_text(encoding="utf-8")
-        setup = "local quarantine=function()\n" + quarantine + "\nend\n"
-        setup += "values.stock='0'; sets.users={user=true}; replay('HELD'); dbStock=0"
-        execute("replay-dead-letter.lua", setup, """
-            assert(result==1 and values.stock=='0' and dbStock==0 and sets.recovery.order)
-            -- Replay fails again: quarantine cannot clear its recovery marker.
-            pending.message=true; KEYS={'source','stock','users','dead','retry'}
-            ARGV={'group','message','user','1','order','retry_exhausted'}
-            assert(quarantine()==1); assert(sets.recovery.order)
-            assert(values.stock=='0' and sets.users.user and count(streams.dead)==1)
-        """)
-
-    def test_multiple_replays_track_each_order_until_commit(self):
-        execute("replay-dead-letter.lua", "values.stock='0'; sets.users={user=true}; replay('HELD')", """
-            assert(result==1 and sets.recovery.order)
-            streams.dead.message={}; ARGV[4]='second-order'; assert(script()==1)
-            assert(count(sets.recovery)==2)
-            redis.call('srem','recovery','order') -- only the first commit is confirmed
-            assert(count(sets.recovery)==1 and sets.recovery['second-order'])
         """)
 
 

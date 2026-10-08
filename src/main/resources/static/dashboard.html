@@ -243,7 +243,6 @@ function renderMetrics(d) {
         <span class="infobar-label">死信</span>
         <strong id="qDead">--</strong>
         <button class="btn btn-ghost" onclick="opsReset()" title="重置指标">重置</button>
-        <button class="btn btn-ghost" onclick="opsReplay()" title="重放死信">重放</button>
         <button class="btn btn-ghost" onclick="opsReconcile()" title="手动对账">对账</button>
     </div>`;
 }
@@ -291,7 +290,6 @@ async function ops(url, label) {
     setTimeout(refreshAll, 600);
 }
 function opsReset()     { if(confirm('重置所有秒杀指标计数器？')) ops('/admin/metrics/reset', '指标重置'); }
-function opsReplay()    { if(confirm('重放所有死信消息到主 Stream？可能重复消费。')) ops('/admin/dead-letter/replay', '死信重放'); }
 function opsReconcile() { ops('/admin/reconcile/trigger', '手动对账'); }
 
 // ===== 工具 =====

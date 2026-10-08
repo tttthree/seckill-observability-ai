@@ -57,11 +57,11 @@ function Invoke-JsonApi {
     return Invoke-RestMethod @arguments
 }
 
-Write-Host "[1/8] Checking application health"
+Write-Host "[1/7] Checking application health"
 $health = Invoke-RestMethod -Method Get -Uri "$BaseUrl/actuator/health"
 Assert-True ($null -ne $health.status) "health endpoint did not return a status"
 
-Write-Host "[2/8] Logging in through the verification-code flow"
+Write-Host "[2/7] Logging in through the verification-code flow"
 $codeResult = Invoke-JsonApi -Method Post -Path "/user/code?phone=$Phone" -Body $null
 Assert-True ($codeResult.success -eq $true) "verification code request failed"
 $verificationCode = [string](Invoke-Redis -Command @("GET", "login:code:$Phone"))
@@ -75,7 +75,7 @@ $userToken = [string]$login.data
 $userHeaders = @{ authorization = $userToken }
 $adminHeaders = @{ "X-Admin-Token" = $AdminToken }
 
-Write-Host "[3/8] Creating a seckill voucher"
+Write-Host "[3/7] Creating a seckill voucher"
 $now = Get-Date
 $voucher = Invoke-JsonApi -Method Post -Path "/voucher/seckill" -Headers $adminHeaders -Body @{
     title = "regression-$($now.ToString('yyyyMMddHHmmss'))"
@@ -86,13 +86,13 @@ $voucher = Invoke-JsonApi -Method Post -Path "/voucher/seckill" -Headers $adminH
 Assert-True ($voucher.success -eq $true) "voucher creation failed"
 $voucherId = [long]$voucher.data
 
-Write-Host "[4/8] Reserving inventory and rejecting a duplicate request"
+Write-Host "[4/7] Reserving inventory and rejecting a duplicate request"
 $order = Invoke-JsonApi -Method Post -Path "/voucher-order/seckill/$voucherId" -Headers $userHeaders -Body $null
 Assert-True ($order.success -eq $true) "seckill reservation failed"
 $duplicate = Invoke-JsonApi -Method Post -Path "/voucher-order/seckill/$voucherId" -Headers $userHeaders -Body $null
 Assert-True ($duplicate.success -eq $false) "duplicate seckill request was not rejected"
 
-Write-Host "[5/8] Waiting for Redis Stream consumption and database commit"
+Write-Host "[5/7] Waiting for Redis Stream consumption and database commit"
 $orderStatus = $null
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
     $orderStatus = Invoke-JsonApi -Method Get -Path "/voucher-order/seckill/$voucherId/status" -Headers $userHeaders -Body $null
@@ -103,24 +103,24 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 }
 Assert-True ($orderStatus.data.status -eq "SUCCESS") "order was not committed within 6 seconds"
 
-Write-Host "[6/7] Exercising dead-letter quarantine and replay"
+Write-Host "[6/7] Exercising dead-letter quarantine"
 $suffix = [Guid]::NewGuid().ToString("N")
 $sourceStream = "regression:source:$suffix"
 $deadStream = "regression:dead:$suffix"
-$targetStream = "regression:target:$suffix"
 $stockKey = "regression:stock:$suffix"
 $orderedKey = "regression:ordered:$suffix"
 $retryKey = "regression:retry:$suffix"
-$recoveryKey = "regression:recovery:$suffix"
 $group = "regression-group"
 $consumer = "regression-consumer"
 $testUserId = "900001"
 $testVoucherId = "900001"
 $testOrderId = "900001"
 
+# dead-letter.lua 只接收 3 个 KEYS：sourceStream / deadLetterStream / retryKey
 try {
     Invoke-Redis -Command @("SET", $stockKey, "0") | Out-Null
     Invoke-Redis -Command @("SADD", $orderedKey, $testUserId) | Out-Null
+    Invoke-Redis -Command @("SET", $retryKey, "4") | Out-Null
     Invoke-Redis -Command @("XGROUP", "CREATE", $sourceStream, $group, "0", "MKSTREAM") | Out-Null
     $sourceId = [string](Invoke-Redis -Command @(
         "XADD", $sourceStream, "*",
@@ -131,26 +131,37 @@ try {
 
     $deadLetterResult = [string](Invoke-Redis -Command @(
         "--eval", "src/main/resources/dead-letter.lua",
-        $sourceStream, $stockKey, $orderedKey, $deadStream, $retryKey, ",",
-        $group, $sourceId.Trim(), $testUserId, $testVoucherId, $testOrderId, "regression"))
+        $sourceStream, $deadStream, $retryKey, ",",
+        $group, $sourceId.Trim(), $testUserId, $testVoucherId, $testOrderId, "retry_exhausted"))
     Assert-True ($deadLetterResult.Trim() -eq "1") "dead-letter quarantine script failed"
+
+    $pendingAfter = [string](Invoke-Redis -Command @(
+        "XPENDING", $sourceStream, $group, "-", "+", "10"))
+    Assert-True ($pendingAfter.Trim() -eq "") "quarantine did not ACK the source message"
+
+    # 死信记录必须被创建，且带 failureReason
+    $deadRecord = [string](Invoke-Redis -Command @("XRANGE", $deadStream, "-", "+", "COUNT", "1"))
+    Assert-True (-not [string]::IsNullOrWhiteSpace($deadRecord)) "dead-letter record was not created"
+    Assert-True ($deadRecord -match "retry_exhausted") "dead-letter record missing failureReason"
+
+    # 关键安全语义：绝不回补库存、绝不释放一人一单资格
     Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "0") "quarantine changed reserved inventory"
     Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "1") "quarantine released eligibility"
+    # 重试计数被清除
+    Assert-True (([string](Invoke-Redis -Command @("EXISTS", $retryKey))).Trim() -eq "0") "quarantine did not clear retry counter"
 
-    $deadRecord = @(Invoke-Redis -Command @("XRANGE", $deadStream, "-", "+", "COUNT", "1"))
-    Assert-True ($deadRecord.Count -gt 0) "dead-letter record was not created"
-    $deadId = [string]$deadRecord[0]
-    $replayResult = [string](Invoke-Redis -Command @(
-        "--eval", "src/main/resources/replay-dead-letter.lua",
-        $deadStream, $targetStream, $stockKey, $orderedKey, $recoveryKey, ",",
-        $deadId.Trim(), $testUserId, $testVoucherId, $testOrderId, "HELD"))
-    Assert-True ($replayResult.Trim() -eq "1") "dead-letter replay script failed"
-    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $recoveryKey, $testOrderId))).Trim() -eq "1") "replay recovery marker missing"
-    Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "0") "HELD replay changed inventory"
-    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "1") "HELD replay changed eligibility"
+    # 重复隔离必须幂等：已 ACK 的消息再次隔离返回 0，且不产生第二条死信
+    $duplicate = [string](Invoke-Redis -Command @(
+        "--eval", "src/main/resources/dead-letter.lua",
+        $sourceStream, $deadStream, $retryKey, ",",
+        $group, $sourceId.Trim(), $testUserId, $testVoucherId, $testOrderId, "retry_exhausted"))
+    Assert-True ($duplicate.Trim() -eq "0") "duplicate quarantine should be a no-op"
+    Assert-True (([string](Invoke-Redis -Command @("XLEN", $deadStream))).Trim() -eq "1") "duplicate quarantine created a second dead letter"
+    Assert-True (([string](Invoke-Redis -Command @("GET", $stockKey))).Trim() -eq "0") "duplicate quarantine changed inventory"
+    Assert-True (([string](Invoke-Redis -Command @("SISMEMBER", $orderedKey, $testUserId))).Trim() -eq "1") "duplicate quarantine released eligibility"
 }
 finally {
-    Invoke-Redis -Command @("DEL", $sourceStream, $deadStream, $targetStream, $stockKey, $orderedKey, $retryKey, $recoveryKey) | Out-Null
+    Invoke-Redis -Command @("DEL", $sourceStream, $deadStream, $stockKey, $orderedKey, $retryKey) | Out-Null
 }
 
 Write-Host "[7/7] Triggering reconciliation and validating metrics"
@@ -161,4 +172,4 @@ Assert-True ([double]$metrics.runtime_metrics.total_requests -ge 2) "request met
 Assert-True ([double]$metrics.runtime_metrics.reserve_success -ge 1) "reservation metric was not collected"
 Assert-True ([double]$metrics.runtime_metrics.order_success -ge 1) "database commit metric was not collected"
 
-Write-Host "Regression passed: login, voucher creation, reservation, duplicate rejection, asynchronous commit, quarantine, replay, reconciliation and runtime metrics."
+Write-Host "Regression passed: login, voucher creation, reservation, duplicate rejection, asynchronous commit, dead-letter quarantine, reconciliation and runtime metrics."

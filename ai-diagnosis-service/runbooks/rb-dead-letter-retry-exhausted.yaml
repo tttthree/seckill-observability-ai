@@ -1,7 +1,7 @@
 id: rb-dead-letter-retry-exhausted
 title: 死信消息（重试超限）处置手册
-version: "3"
-updated_at: 2026-10-02
+version: "4"
+updated_at: 2026-10-08
 incident_types:
   - DEAD_LETTER
 match_signals:
@@ -11,18 +11,21 @@ keywords:
   - 死信
   - 重试超限
   - retry_exhausted
-  - 补偿
-  - 重放
+  - 人工核查
+  - 预占
   - 库存回补
-summary: 新版本重试超限后隔离至死信 Stream，保留 Redis reservation（HELD）；人工核查后重放，HELD 不再次预占，历史无标记死信仍走重新预占。
+summary: 重试超限后消息被隔离至死信 Stream。系统刻意保留 Redis 库存预占和一人一单资格，不做任何自动补偿，避免 DB 事务晚提交导致库存被重复释放；需要人工核查订单落库状态、Redis 与 DB 库存以及资格集合。
 checks:
   - 确认死信条目的 failure_reason 是否为 retry_exhausted，并核对 snapshot 中记录的 max_retry（Context 不提供该消息的实际重试次数，不要假设）。
-  - 用 queue.dead_letters[].order_id 与 database.recent_orders[].order_id / database.order_count 对照，核对订单是否已落库，并核对 Redis 库存与下单资格；不得假设进入 DLQ 已回补库存。
-  - 检查该券的死信条目在构建时刻是否仍然存在（queue.dead_letters 非空）：存在表示仍待处置；已消失不等于业务恢复；核对 Redis/DB 库存均存在且一致。
-  - 若准备重放，核实消息版本：HELD 仅重投、不再次扣库存或 SADD；历史无标记消息需重新校验库存和资格。
+  - 用 queue.dead_letters[].order_id 与 database.recent_orders[].order_id / database.order_count 对照，核对订单是否已落库；不得假设进入 DLQ 已回补库存。
+  - 核对 Redis 与 DB 两端库存是否一致（redis.stock.present / redis.stock.value 与 database.stock / database.voucher_exists）；Redis stock 缺失是真实故障证据，不得当作 0。
+  - 核对 redis.ordered_user_count 与 database.order_count 的差异，判断一人一单资格与已落库订单是否匹配。
+  - 检查该券的死信条目在构建时刻是否仍然存在（queue.dead_letters 非空）：存在表示仍待人工处置；已消失不等于业务已经恢复。
+  - 系统不提供自动重放或自动补偿入口，处置动作必须由人工确认后执行。
 do_not:
   - 禁止绕过一人一单与库存约束直接手工插入订单。
-  - 禁止把进入 DLQ 描述成库存已回补；未确认 reservation 和落库状态时不得人工释放资格或回补库存。
+  - 禁止把进入 DLQ 描述成库存已回补；未确认订单落库状态时不得人工释放资格或回补库存。
+  - 禁止仅凭死信条目消失就判定故障已恢复。
 references:
   - ARCHITECTURE.md#4-失败恢复
   - ARCHITECTURE.md#5-一致性边界
