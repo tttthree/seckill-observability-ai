@@ -9,6 +9,8 @@
 - 模型只产出**语义字段**（`diagnosis_status` / `root_cause` / `evidence(path,note)` /
   `recommended_actions(action,rationale)` / `insufficient_reason`），
   其余元数据（`observed`、`requires_human`、`evidence_validation`、`model`、时间、`error_code`）全部由本服务生成；
+- `requires_human` **恒为 `true`**，属于**服务端强制安全边界**而非模型自由决定：模型即使输出
+  `requires_human=false` 也会被服务端覆盖，模型无法要求自动执行任何动作（本服务也不提供执行能力）；
 - 模型侧失败一律返回 **HTTP 200 + `diagnosis_status=UNAVAILABLE`**，让 Java 调用方无需为 AI 可用性写异常分支；
 - 单次调用、**不做 retry/backoff**（Java 集成层负责有界重试与限流，未实现熔断器）；
 - Runbook 只是**通用知识**，不是本次事故的事实；`evidence[].path` **只能**引用 IncidentContext。

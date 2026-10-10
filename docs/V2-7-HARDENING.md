@@ -2,6 +2,11 @@
 
 日期：2026-10-02。基线：ea74646c1f04761fd55142b58a659bd4588ae701。
 
+> **该文件为历史验证记录，当前架构请以 [README.md](../README.md) 与 [ARCHITECTURE.md](../ARCHITECTURE.md) 为准。**
+> 文中描述的 DLQ replay / recovery marker / HELD-LEGACY 双轨协议、claim citation grounding 等能力已在后续剪枝中移除：
+> 最终 Resume-Lite 版本不提供自动重放、自动补偿或自动恢复，`DEAD_LETTER` 事件保持 `OPEN` 等待人工核查。
+> 文中出现的历史文件（如 `src/main/resources/replay-dead-letter.lua`、`ai-diagnosis-service/services/claim_grounding.py`）在当前版本已不存在。
+
 ## 实现
 
 | 项目 | 收口方式 |
@@ -27,11 +32,15 @@
 
 ## 冻结边界
 
+> 历史记录：本节冻结的是当时的契约版本（IncidentContext v2-2.1、prompt_version=v2-6.1）；当前版本已为 IncidentContext v3.0 / prompt_version=v3.1，见 [ARCHITECTURE.md](../ARCHITECTURE.md) §8～§11。
+
 Java 11、Spring Boot 2.7.18、MyBatis-Plus 3.4.3、Redis Stream、MySQL 条件扣减/唯一约束、Incident open_key 均保留。IncidentContext v2-2.1、DiagnosisResult、evidence_validator、V2-4 Java AI client、V2-5 检索、prompt_version=v2-6.1 及单次模型调用不变。
 
 未实现 Dashboard、诊断持久化、操作历史、审计表、NLI/verifier、第二次模型调用或新分布式框架。claim citation 只保证结论引用了真实 accepted evidence，不构成自然语言语义蕴含的形式化证明。
 
 ## 部署及剩余风险
+
+> 历史记录：本节关于 HELD 保留预占与 recovery marker 的风险描述针对的是当时尚未剪枝的实现；当前版本不提供 replay / recovery marker，`DEAD_LETTER` 保持 `OPEN` 等待人工核查。
 
 - 既有券 metadata 缺失时 fail closed，管理员 resume 可补齐；resume 不补库存。缺库存必须人工核查。
 - DB LocalDateTime 按 JVM 默认时区转 epoch；各实例需统一时区，例如 `-Duser.timezone=Asia/Shanghai`。

@@ -95,11 +95,17 @@ seckill.lua
 Redis Stream consumer group g1
   |
   v
-createVoucherOrder transaction
+VoucherOrderHandler
+  |
+  v
+handleVoucherOrder → createVoucherOrder transaction
   |-- UPDATE tb_seckill_voucher SET stock = stock - 1
   |     WHERE voucher_id = ? AND stock > 0
   +-- INSERT tb_voucher_order
         UNIQUE(user_id, voucher_id)
+  |
+  v
+XACK（仅在事务成功后确认；失败不 ACK，消息留在 PEL 交给 Pending 处理器）
 ```
 
 HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通过订单状态接口区分：
@@ -124,7 +130,7 @@ HTTP 请求只等待 Redis 原子预占，不等待 MySQL 写入。客户端通�
 
 1. 查询消费者组 PEL。
 2. 对超过宽限时间的消息执行 `XCLAIM`。
-3. 再次尝试事务落库。
+3. 先按 **exact `orderId`** 做幂等检查（已落库则直接 ACK），否则再次尝试事务落库。
 4. 记录每条消息的重试次数并设置 TTL。
 
 ### 4.3 重试超限与死信隔离
@@ -162,7 +168,7 @@ Resume-Lite **不提供**自动重放、自动补偿或自动恢复判定，也�
 | 重复隔离 | 隔离脚本以 `XACK` 结果作为执行门槛，始终保留预占 |
 | 长期库存偏差 | 脏券快速路径 + 低频有界分页兜底；missing 不等于 0，两阶段确认与人工告警 |
 
-对账不会自动覆盖 Redis 或 MySQL 库存。因为消费中的短暂差异是正常状态，直接覆盖可能放大错误；系统只在连续两轮不一致时记录 `reconcile_mismatch` 并告警。
+对账不会自动覆盖 Redis 或 MySQL 库存。因为消费中的短暂差异是正常状态，直接覆盖可能放大错误；**第一次发现不一致只写 marker（不告警）**，连续两轮仍不一致才记录 `reconcile_mismatch` 并上报 `INVENTORY_MISMATCH` Incident。fallback 只把发现的券重新标为 dirty，不会绕过两阶段确认直接报错。
 
 ## 6. 监控模型
 

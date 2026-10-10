@@ -1,6 +1,6 @@
-# 当前版本压测结果
+# 压测结果与历史对比
 
-**Code baseline: `0ac054c1eb97e6919c84a56268813c1be8c7d611`**（Resume-Lite 冻结版本；本轮仅修改文档，未改动任何生产代码）
+测试执行于代码基线 `0ac054c1eb97e6919c84a56268813c1be8c7d611`；**该版本之后至最终 HEAD 未修改 Java / Python 运行代码**（期间变更仅涉及 README、ARCHITECTURE、AI 服务说明与 benchmark 结果文档）。因此以下结果仍对应当前运行代码，并非在最终版本上重新执行。
 
 ## 测试模型
 

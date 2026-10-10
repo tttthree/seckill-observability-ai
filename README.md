@@ -1,6 +1,6 @@
 <h1 align="center">Seckill Observability & AI Diagnosis</h1>
 
-<p align="center">高并发秒杀 · 可观测性 · AI 辅助故障诊断</p>
+<p align="center">高并发秒杀 · 可靠异步消费 · 可观测性 + AI 故障诊断</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/JDK-11-orange?logo=openjdk" alt="JDK 11" />
@@ -9,11 +9,31 @@
   <img src="https://img.shields.io/badge/Monitor-Prometheus%20%2B%20Grafana-blue?logo=prometheus" alt="Prometheus and Grafana" />
 </p>
 
-面向高并发秒杀场景的可验证工程实现：Redis Lua 原子预占资格，Redis Stream 异步削峰，Pending/XCLAIM 限次重试与安全死信隔离保障可靠落库，并以库存对账、Prometheus/Grafana 指标，以及 Incident → IncidentContext → AI 诊断，形成可观测、可追溯的故障诊断链路。
+面向高并发秒杀场景的可验证工程实现，三个主题各有明确的代码与边界：
+
+- **高并发秒杀**：Redis Lua 在一次原子操作内完成活动时间闸门、库存校验、一人一单与资格预占；HTTP 只等待 Redis，不等待 MySQL。
+- **可靠异步消费**：Redis Stream 削峰，Pending / PEL 通过 `XPENDING` + `XCLAIM` 认领超时消息并限次重试，重试超限后用 DLQ 做安全隔离并保留预占，另有两阶段库存对账兜底。
+- **可观测性 + AI 故障诊断**：Prometheus / Grafana 展示运行指标；对账偏差、死信与消费者不健康统一抽象为 Incident，构建只收证据的 `IncidentContext`，再交由独立 Python 服务做结构化 AI 诊断。
+
+详细设计、失败语义与契约见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 项目来源与个人改造边界
 
-本项目基于黑马点评教学项目进行二次重构。个人改造聚焦秒杀主链路：删除店铺、博客等非核心模块，补充 Redis Stream 异步下单的 Pending/XCLAIM 恢复、安全死信隔离、库存对账、Prometheus/Grafana 监控，以及基于 Incident 与结构化 IncidentContext 的 AI 故障诊断（独立 Python FastAPI 服务 + Runbook 检索）。原有 `com.hmdp` 包名与 `hmdp` 数据库名作为兼容性边界保留，避免与业务能力无关的大范围迁移。
+本项目**基于黑马点评教学项目进行二次重构**，不是完全原创；个人改造集中在以下方面：
+
+- **秒杀主链剪枝**：删除店铺、博客、关注等非核心模块，只保留登录、券与秒杀下单主线。
+- **Redis Stream 异步下单**：HTTP 只等待 Lua 资格预占，落库由消费者组异步完成。
+- **Pending / XCLAIM 恢复**：独立 Pending 处理器扫描 PEL、认领超时消息并限次重试。
+- **DLQ 安全隔离**：重试超限后只隔离并保留预占，不自动回补库存、不释放下单资格。
+- **库存对账**：dirty set 主路径 + 低频有界 DB 分页兜底，两阶段确认后才上报 Incident，绝不自动改库存。
+- **Prometheus / Grafana**：业务计数、链路转化率、消费者心跳、Pending、死信与对账偏差监控。
+- **Incident**：对账偏差 / 死信 / 消费者不健康统一为故障事件，按 `incidentType + businessKey` 聚合。
+- **IncidentContext**：按 IncidentType 计划采集范围，只收集真实证据，不做根因推断。
+- **Java → Python AI Diagnosis**：独立 FastAPI 服务，只消费 `IncidentContext`。
+- **Runbook 检索**：确定性 Top-2，不依赖 embedding 或向量库。
+- **Evidence 回校验**：`evidence.path` 由服务端回溯 Context，并用真实值覆盖 `observed`。
+
+原有 `com.hmdp` 包名与 `hmdp` 数据库名作为兼容性边界保留，避免与业务能力无关的大范围迁移。项目**不宣称**实现了自动补偿、自动恢复 DLQ、自动 replay 或 AI 自动修复：死信与故障事件均以人工核查收口。
 
 ## 核心链路
 
@@ -63,6 +83,28 @@ Redis Stream 消费者组
                                               +-- evidence.path 服务端回溯 + observed 覆盖
 ```
 
+## 核心代码导航
+
+Java 类位于 `src/main/java/com/hmdp/`，Python 模块位于 `ai-diagnosis-service/`。
+
+| 能力 | 核心代码 |
+|---|---|
+| 秒杀 HTTP 入口 | `VoucherOrderController` → `VoucherOrderServiceImpl.seckillVoucher()` |
+| 秒杀券初始化 | `VoucherController` → `VoucherServiceImpl.addSeckillVoucher()` |
+| Lua 原子资格预占 | `src/main/resources/seckill.lua` |
+| Redis Stream 正常消费 | `VoucherOrderServiceImpl.VoucherOrderHandler` |
+| MySQL 事务落库 | `handleVoucherOrder()` → `createVoucherOrder()` |
+| Pending 恢复 | `VoucherOrderServiceImpl.PendingHandlerTask` |
+| DLQ 安全隔离 | `routeToDeadLetter()` + `src/main/resources/dead-letter.lua` |
+| 库存对账 | `reconcile()` + `fallbackReconcile()` |
+| 消费者健康 | `ConsumerHealthIndicator` |
+| Incident 检测与聚合 | `IncidentDetector` + `IncidentServiceImpl` |
+| IncidentContext | `IncidentContextBuilderImpl` |
+| Java AI 集成 | `IncidentDiagnosisController` + `AiDiagnosisClientImpl` |
+| Python AI 主流程 | `ai-diagnosis-service/services/diagnosis_service.py` |
+| Runbook 检索 | `ai-diagnosis-service/services/runbook_retriever.py` |
+| Evidence 回校验 | `ai-diagnosis-service/services/evidence_validator.py` |
+
 ## 核心设计
 
 | 设计 | 工程实现 |
@@ -78,9 +120,11 @@ Redis Stream 消费者组
 | 结构化 AI 诊断 | `ai-diagnosis-service/`（Python 3.12 + FastAPI）只消费 `IncidentContext`；模型只输出语义字段，`evidence.path` 由服务端回溯 Context 并用真实值覆盖 `observed` |
 | 可观测 | 业务计数、链路转化率、消费者心跳、Pending、死信和对账偏差统一采集到 Prometheus / Grafana |
 
-## 当前版本压测结果
+## 压测结果
 
-> 在**当前 Resume-Lite 代码基线 `0ac054c`** 上重新完成三轮 2000 用户、400 库存、10 秒 Ramp-up 测试；三轮均完成 400/400 资格预占异步落库，其余请求由 Redis 库存层拦截。三轮中位数：Avg **58.10 ms**、P95 **230.6 ms**、P99 **383.9 ms**、TPS **236.41 req/s**，服务端错误 0、Pending 0、死信 0、库存一致。
+压测执行于代码基线 `0ac054c`。从该基线到当前最终版本仅更新 README、架构说明、AI 服务说明与 benchmark 结果文档，**Java / Python 运行代码未发生变化**，因此以下结果仍对应当前运行代码（并非在最终版本上重新执行）。
+
+> 三轮测试为 2000 用户、400 库存、10 秒 Ramp-up；三轮均完成 400/400 资格预占异步落库，其余请求由 Redis 库存层拦截。三轮中位数：Avg **58.10 ms**、P95 **230.6 ms**、P99 **383.9 ms**、TPS **236.41 req/s**，服务端错误 0、Pending 0、死信 0、库存一致。
 >
 > Run 3 的 JMeter 汇总含 1 条**客户端** `BindException: Address already in use`（本机临时端口耗尽，请求未到达服务端），故该轮服务端只收到 1999 个请求。已如实记录、未重跑美化；数据库侧三张券均为 400 单、库存 0、无重复订单。
 
@@ -176,7 +220,7 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 
 `/admin/incidents/{id}/context` 实时构建、不落库，只收集真实读到的证据，**不做任何根因推断**；按 IncidentType 严格计划采集范围，单个数据源失败只降级该段并记入 `unavailable_sources`，HTTP 仍返回 200；Incident 不存在返回 404。输出契约见 [ARCHITECTURE.md](ARCHITECTURE.md) §8。
 
-`/admin/incidents/{id}/diagnosis` 复用同一个 Context Builder，再调用独立 Python 诊断服务返回**结构化诊断**（根因 / 可回溯证据 / 人工建议）。AI 侧不可用、超时或响应非法时，Java 侧**有界失败**并返回 `diagnosis_status=UNAVAILABLE` + `error_code`：`AI_*` 前缀由 Java 集成层生成（如 `AI_SERVICE_UNREACHABLE` / `AI_SERVICE_READ_TIMEOUT` / `AI_RATE_LIMITED`），其余为 Python 原样返回（如 `MODEL_NOT_CONFIGURED`）；`error_origin` 明确区分两者。**不会伪造成 DIAGNOSED**，也不影响秒杀交易链路。契约、响应校验、超时 / 重试 / 限流策略见 [ARCHITECTURE.md](ARCHITECTURE.md) §10.2～§10.4。
+`/admin/incidents/{id}/diagnosis` 复用同一个 Context Builder，再调用独立 Python 诊断服务返回**结构化诊断**（根因 / 可回溯证据 / 人工建议）。AI 不可用、超时或响应非法时，Java 侧**有界失败**并返回 `diagnosis_status=UNAVAILABLE` + `error_code`，由 `error_origin` 区分错误来自 Java 集成层还是 Python；**不会伪造成 DIAGNOSED**，也不影响秒杀交易链路。错误码、响应校验、超时 / 重试 / 限流策略见 [ARCHITECTURE.md](ARCHITECTURE.md) §10.2～§10.4。
 
 用户接口通过 `authorization: <token>` 传递身份；运维写接口与故障事件查询通过 `X-Admin-Token: <ADMIN_TOKEN>` 鉴权。
 
@@ -188,13 +232,12 @@ JMeter 默认模拟 2000 用户（对应 2000 个线程）竞争 400 份库存�
 - [benchmark/RESULTS.md](benchmark/RESULTS.md)：压测结果记录（含剪枝前版本的历史数据）
 - `src/main/resources/grafana-dashboard-seckill.json`：Grafana 仪表板
 - `src/main/resources/static/dashboard.html`：秒杀运行监控页面
-- `docs/history/` 与 [docs/V2-7-HARDENING.md](docs/V2-7-HARDENING.md)：开发过程与历史验证记录（非当前架构描述）
+- [docs/V2-7-HARDENING.md](docs/V2-7-HARDENING.md)：历史验证记录（V2-6.1 / V2-7 阶段；其中部分能力已被后续剪枝移除，非当前架构描述）
 
 ## 当前可靠性边界
 
 - **活动闸门**：活动状态与库存分离，Lua 校验活动元数据及起止时间（边界含 begin/end）。已有券必须通过管理员 resume 补齐 `active/begin/end` 元数据，缺失时 fail closed；resume 不覆盖 Redis stock，缺失库存需要人工核查。
-- **安全死信隔离**：重试超限后消息只做隔离，永不自动回补库存或释放资格。`DEAD_LETTER` 事件保持 `OPEN`，当前不实现自动重放、自动补偿或自动恢复。
-- **对账**：dirty set 为主路径，另有低频有界 DB 分页 fallback，仅重新标脏、不修改库存。Redis stock key 缺失一律视为真实异常证据（`stock.present=false` / `value=null`），**绝不当作 0**。
+- **死信与对账**：重试超限后消息只做隔离，永不自动回补库存或释放资格，`DEAD_LETTER` 事件保持 `OPEN`，不提供自动重放 / 补偿 / 恢复。对账以 dirty set 为主路径，另有低频有界 DB 分页 fallback，仅重新标脏、不修改库存；Redis stock key 缺失一律视为真实异常证据（`stock.present=false` / `value=null`），**绝不当作 0**。
 - **消费者健康**：仅主消费循环刷新 main heartbeat；停滞告警要求 health UP 且 `pending > 0` 且成功心跳超时。
 - **时区**：DB `LocalDateTime` 按 JVM 默认时区转 epoch millis，各实例需统一时区（例如 `-Duser.timezone=Asia/Shanghai`）。
 - **未实现**：诊断持久化、操作历史、审计表、NLI / verifier 模型、第二次模型调用、分布式事务或新的分布式框架。
